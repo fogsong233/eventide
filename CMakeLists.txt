@@ -4,6 +4,7 @@ project(eventide LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(FetchContent)
@@ -67,6 +68,7 @@ endif()
 
 add_executable(unit_tests
     "tests/main.cpp"
+    "tests/reflection/name_tests.cpp"
 )
 
 target_include_directories(unit_tests PRIVATE

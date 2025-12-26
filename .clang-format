@@ -117,7 +117,7 @@ IncludeCategories:
     Priority: 30
     SortPriority: 34
 
-  - Regex: '^["<](Test)/'
+  - Regex: '^["<](zest)/'
     Priority: 20
     SortPriority: 22
 

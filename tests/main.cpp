@@ -3,9 +3,9 @@
 #include <string_view>
 #include <unistd.h>
 
+#include "zest/zest.h"
 #include "eventide/loop.h"
 #include "eventide/stream.h"
-#include "zest/zest.h"
 
 namespace ev = eventide;
 
@@ -20,14 +20,6 @@ ev::task<> echo(ev::event_loop& loop) {
         std::println("echo: {}", content);
     }
 }
-
-TEST_SUITE(Test) {
-
-TEST_CASE(A) {
-    ASSERT_TRUE(false);
-}
-
-};  // TEST_SUITE(Test)
 
 int main(int argc, char** argv) {
     std::string filter;
