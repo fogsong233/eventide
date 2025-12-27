@@ -1,6 +1,3 @@
-#include <print>
-#include <string_view>
-
 #include "zest/zest.h"
 #include "reflection/name.h"
 
@@ -59,12 +56,19 @@ union union_z {
 
 inline static union_z ins_y2;
 
-TEST_CASE(field_name, {.focus = true}) {
+TEST_CASE(field_name) {
     EXPECT_EQ(field_name<&ins_y.x>(), "x");
     EXPECT_EQ(field_name<&ins_y.y_>(), "y_");
 
     EXPECT_EQ(field_name<&ins_y2.x>(), "x");
     EXPECT_EQ(field_name<&ins_y2.y_>(), "y_");
+}
+
+enum class enum_y { RED, YELLOW };
+
+TEST_CASE(enum_name) {
+    EXPECT_EQ(enum_name<enum_y::RED>(), "RED");
+    EXPECT_EQ(enum_name<enum_y::YELLOW>(), "YELLOW");
 }
 
 };  // TEST_SUITE(reflection)

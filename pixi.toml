@@ -24,4 +24,5 @@ stylua = "*"
 format = "pre-commit run --all-files"
 
 [environments]
+default = []
 format = ["format"]

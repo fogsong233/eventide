@@ -41,6 +41,24 @@ consteval auto type_name(bool qualified = false) {
     return name;
 }
 
+template <auto value>
+    requires std::is_enum_v<decltype(value)>
+consteval auto enum_name() {
+    std::string_view name = std::source_location::current().function_name();
+#if __GNUC__ || __clang__
+    std::size_t start = name.find('=') + 2;
+    std::size_t end = name.size() - 1;
+#elif _MSC_VER
+    std::size_t start = name.find('<') + 1;
+    std::size_t end = name.rfind(">(");
+#else
+    static_assert(false, "Not supported compiler");
+#endif
+    name = name.substr(start, end - start);
+    start = name.rfind("::");
+    return start == std::string_view::npos ? name : name.substr(start + 2);
+}
+
 template <auto*>
 consteval auto field_name() {
     std::string_view name = std::source_location::current().function_name();

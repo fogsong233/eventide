@@ -69,6 +69,7 @@ endif()
 add_executable(unit_tests
     "tests/main.cpp"
     "tests/reflection/name_tests.cpp"
+    "tests/reflection/struct_tests.cpp"
 )
 
 target_include_directories(unit_tests PRIVATE
