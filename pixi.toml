@@ -7,7 +7,7 @@ authors = ["ykiko <ykikoykikoykiko@gmail.com>"]
 license = "Apache-2.0"
 license-file = "LICENSE"
 readme = "README.md"
-#documentation = "https://clice.io"
+documentation = "https://clice.io"
 repository = "https://github.com/clice-io/eventide"
 
 channels = ["conda-forge"]
@@ -15,4 +15,13 @@ platforms = ["win-64", "linux-64", "osx-arm64"]
 
 [dependencies]
 
+[feature.format.dependencies]
+pre-commit = "*"
+clang-format = "*"
+stylua = "*"
+
+[environments]
+format = ["format"]
+
 [tasks]
+format = "pre-commit run --all-files"
