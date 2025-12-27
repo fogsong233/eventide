@@ -47,4 +47,5 @@ build*/
 .pixi/*
 !.pixi/config.toml
 
-.vscode
+.clangd
+.vscode/
