@@ -14,10 +14,10 @@ namespace eventide {
 
 template <>
 struct awaiter<fs_event_tag> {
-    using promise_t = task<std::expected<fs_event::change, std::error_code>>::promise_type;
+    using promise_t = task<result<fs_event::change>>::promise_type;
 
     fs_event* self;
-    std::expected<fs_event::change, std::error_code> result = std::unexpected(std::error_code{});
+    result<fs_event::change> outcome = std::unexpected(error{});
 
     static void on_change(uv_fs_event_t* handle, const char* filename, int events, int status) {
         auto* watcher = static_cast<fs_event*>(handle->data);
@@ -25,7 +25,7 @@ struct awaiter<fs_event_tag> {
             return;
         }
 
-        auto deliver = [&](std::expected<fs_event::change, std::error_code>&& value) {
+        auto deliver = [&](result<fs_event::change>&& value) {
             if(watcher->waiter && watcher->active) {
                 *watcher->active = std::move(value);
 
@@ -44,7 +44,7 @@ struct awaiter<fs_event_tag> {
         };
 
         if(status < 0) {
-            deliver(std::unexpected(uv_error(status)));
+            deliver(std::unexpected(error(status)));
             return;
         }
 
@@ -63,24 +63,24 @@ struct awaiter<fs_event_tag> {
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting) noexcept {
         self->waiter = waiting ? &waiting.promise() : nullptr;
-        self->active = &result;
+        self->active = &outcome;
         return std::noop_coroutine();
     }
 
-    std::expected<fs_event::change, std::error_code> await_resume() noexcept {
+    result<fs_event::change> await_resume() noexcept {
         self->waiter = nullptr;
         self->active = nullptr;
-        return std::move(result);
+        return std::move(outcome);
     }
 };
 
-std::expected<fs_event, std::error_code> fs_event::create(event_loop& loop) {
+result<fs_event> fs_event::create(event_loop& loop) {
     fs_event w(sizeof(uv_fs_event_t));
     auto handle = w.as<uv_fs_event_t>();
 
     int err = uv_fs_event_init(static_cast<uv_loop_t*>(loop.handle()), handle);
     if(err != 0) {
-        return std::unexpected(uv_error(err));
+        return std::unexpected(error(err));
     }
 
     w.mark_initialized();
@@ -88,28 +88,28 @@ std::expected<fs_event, std::error_code> fs_event::create(event_loop& loop) {
     return w;
 }
 
-std::error_code fs_event::start(const char* path, unsigned int flags) {
+error fs_event::start(const char* path, unsigned int flags) {
     auto handle = as<uv_fs_event_t>();
     handle->data = this;
     int err = uv_fs_event_start(handle, awaiter<fs_event_tag>::on_change, path, flags);
     if(err != 0) {
-        return uv_error(err);
+        return error(err);
     }
 
     return {};
 }
 
-std::error_code fs_event::stop() {
+error fs_event::stop() {
     auto handle = as<uv_fs_event_t>();
     int err = uv_fs_event_stop(handle);
     if(err != 0) {
-        return uv_error(err);
+        return error(err);
     }
 
     return {};
 }
 
-task<std::expected<fs_event::change, std::error_code>> fs_event::wait() {
+task<result<fs_event::change>> fs_event::wait() {
     if(pending.has_value()) {
         auto out = std::move(*pending);
         pending.reset();
@@ -117,7 +117,7 @@ task<std::expected<fs_event::change, std::error_code>> fs_event::wait() {
     }
 
     if(waiter != nullptr) {
-        co_return std::unexpected(uv_error(UV_EALREADY));
+        co_return std::unexpected(error::connection_already_in_progress);
     }
 
     co_return co_await awaiter<fs_event_tag>{this};

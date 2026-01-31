@@ -3,7 +3,6 @@
 #include <coroutine>
 #include <cstddef>
 #include <deque>
-#include <expected>
 #include <span>
 #include <string>
 #include <string_view>
@@ -56,12 +55,16 @@ private:
     friend struct awaiter;
 
 public:
-    task<std::expected<Stream, std::error_code>> accept();
+    acceptor(acceptor&& other) noexcept;
+
+    acceptor& operator=(acceptor&& other) noexcept;
+
+    task<result<Stream>> accept();
 
 private:
     async_node* waiter = nullptr;
-    std::expected<Stream, std::error_code>* active = nullptr;
-    std::deque<std::expected<Stream, std::error_code>> pending;
+    result<Stream>* active = nullptr;
+    std::deque<result<Stream>> pending;
 };
 
 class pipe : public stream {
@@ -73,10 +76,9 @@ private:
 public:
     using acceptor = eventide::acceptor<pipe>;
 
-    static std::expected<pipe, std::error_code> open(event_loop& loop, int fd);
-    static std::expected<acceptor, std::error_code> listen(event_loop& loop,
-                                                           const char* name,
-                                                           int backlog = 128);
+    static result<pipe> open(event_loop& loop, int fd);
+
+    static result<acceptor> listen(event_loop& loop, const char* name, int backlog = 128);
 };
 
 class tcp_socket : public stream {
@@ -86,13 +88,13 @@ private:
 public:
     using acceptor = eventide::acceptor<tcp_socket>;
 
-    static std::expected<tcp_socket, std::error_code> open(event_loop& loop, int fd);
+    static result<tcp_socket> open(event_loop& loop, int fd);
 
-    static std::expected<acceptor, std::error_code> listen(event_loop& loop,
-                                                           std::string_view host,
-                                                           int port,
-                                                           unsigned int flags = 0,
-                                                           int backlog = 128);
+    static result<acceptor> listen(event_loop& loop,
+                                   std::string_view host,
+                                   int port,
+                                   unsigned int flags = 0,
+                                   int backlog = 128);
 };
 
 class console : public stream {
@@ -100,7 +102,7 @@ private:
     using stream::stream;
 
 public:
-    static std::expected<console, std::error_code> open(event_loop& loop, int fd);
+    static result<console> open(event_loop& loop, int fd);
 };
 
 }  // namespace eventide

@@ -2,27 +2,14 @@
 
 #include <cassert>
 #include <cstdlib>
-#include <expected>
+#include <memory>
 #include <optional>
 #include <vector>
 
+#include "error.h"
 #include "frame.h"
 
 namespace eventide {
-
-struct cancellation_t {};
-
-template <typename T>
-constexpr bool is_cancellation_t = false;
-
-template <typename T>
-constexpr bool is_cancellation_t<std::expected<T, cancellation_t>> = true;
-
-template <typename T>
-class task;
-
-template <typename T>
-using ctask = task<std::expected<T, cancellation_t>>;
 
 template <typename T>
 struct promise_result {
@@ -35,7 +22,7 @@ struct promise_result {
 };
 
 template <typename T>
-struct promise_result<std::expected<T, cancellation_t>> {
+struct promise_result<std::expected<T, cancellation>> {
     std::optional<T> value;
 
     template <typename U>
@@ -43,11 +30,11 @@ struct promise_result<std::expected<T, cancellation_t>> {
         value.emplace(std::forward<U>(val));
     }
 
-    void return_value(cancellation_t) {}
+    void return_value(cancellation) {}
 };
 
 template <>
-struct promise_result<std::expected<void, cancellation_t>> {
+struct promise_result<std::expected<void, cancellation>> {
     void return_void() noexcept {}
 };
 
@@ -70,12 +57,12 @@ public:
             return coroutine_handle::from_promise(*this);
         }
 
-        auto initial_suspend() noexcept {
+        auto initial_suspend() const noexcept {
             return std::suspend_always();
         }
 
         auto final_suspend() const noexcept {
-            return final_awaiter();
+            return transition_await(async_node::Finished);
         }
 
         auto get_return_object() {
@@ -102,16 +89,16 @@ public:
         auto await_suspend(
             std::coroutine_handle<Promise> awaiter,
             std::source_location location = std::source_location::current()) noexcept {
-            awaitee.h.promise().state = async_node::Running;
-            awaitee.h.promise().location = location;
-            return awaitee.h.promise().suspend(awaiter.promise());
+            return awaitee.h.promise().link_continuation(&awaiter.promise(), location);
         }
 
         T await_resume() noexcept {
             auto& promise = awaitee.h.promise();
             if(promise.state == async_node::Cancelled) {
                 if constexpr(is_cancellation_t<T>) {
-                    return std::unexpected(cancellation_t());
+                    return std::unexpected(cancellation());
+                } else if constexpr(is_status_t<T>) {
+                    return std::unexpected(status(cancellation{}));
                 } else {
                     /// Implicitly spread cancellation, never call this.
                     std::abort();
@@ -187,6 +174,121 @@ public:
         /// sounds like undefined behavior.
         using coroutine_handle = ctask<T>::coroutine_handle;
         return ctask<T>(coroutine_handle::from_address(handle.address()));
+    }
+
+private:
+    coroutine_handle h;
+};
+
+template <typename T>
+class shared_task;
+
+template <typename T>
+class shared_future : public waiter_link {
+public:
+    shared_future(shared_resource* resource) : waiter_link(async_node::NodeKind::SharedFuture) {
+        resource->inc_ref();
+        resource->insert(this);
+    }
+
+    shared_future(const shared_future&) = delete;
+
+    shared_future(shared_future&& other) : waiter_link(async_node::NodeKind::SharedFuture) {
+        auto temp = other.resource;
+        temp->remove(&other);
+        temp->insert(this);
+    }
+
+    ~shared_future() {
+        if(resource) {
+            auto temp = resource;
+            temp->remove(this);
+            temp->dec_ref();
+        }
+    }
+
+    using promise_type = typename shared_task<T>::promise_type;
+
+    bool await_ready() const noexcept {
+        return static_cast<promise_type*>(resource)->value.has_value();
+    }
+
+    template <typename Promise>
+    auto await_suspend(std::coroutine_handle<Promise> awaiter,
+                       std::source_location location = std::source_location::current()) noexcept {
+        return link_continuation(&awaiter.promise(), location);
+    }
+
+    std::expected<T, cancellation> await_resume() {
+        if(resource->state == Finished) {
+            assert(await_ready() && "resume without value");
+            return *static_cast<promise_type*>(resource)->value;
+        } else {
+            return std::unexpected(cancellation());
+        }
+    }
+};
+
+template <typename T>
+class shared_task {
+public:
+    friend class event_loop;
+
+    struct promise_type;
+
+    using coroutine_handle = std::coroutine_handle<promise_type>;
+
+    struct promise_type : shared_resource, promise_result<T> {
+        auto handle() {
+            return coroutine_handle::from_promise(*this);
+        }
+
+        auto initial_suspend() const noexcept {
+            return std::suspend_always();
+        }
+
+        auto final_suspend() const noexcept {
+            return transition_await(async_node::Finished);
+        }
+
+        auto get_return_object() {
+            return shared_task<T>(handle());
+        }
+
+        void unhandled_exception() {
+            std::abort();
+        }
+
+        promise_type() : shared_resource(async_node::NodeKind::SharedTask) {
+            this->address = handle().address();
+        }
+    };
+
+public:
+    shared_task() = default;
+
+    explicit shared_task(coroutine_handle h) noexcept : h(h) {
+        h.promise().inc_ref();
+    }
+
+    ~shared_task() {
+        h.promise().dec_ref();
+    }
+
+    auto result() {
+        if constexpr(!std::is_void_v<T>) {
+            return std::move(*h.promise().value);
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    async_node* operator->() {
+        return &h.promise();
+    }
+
+    shared_future<T> get() {
+        return shared_future<T>(&h.promise());
     }
 
 private:

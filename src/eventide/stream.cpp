@@ -47,7 +47,9 @@ struct awaiter<stream_read_tag> {
             if(s) {
                 uv_read_stop(stream);
                 if(s->reader) {
-                    s->reader->resume();
+                    auto reader = s->reader;
+                    s->reader = nullptr;
+                    reader->resume();
                 }
             }
             return;
@@ -56,7 +58,9 @@ struct awaiter<stream_read_tag> {
         s->buffer.advance_write(static_cast<size_t>(nread));
 
         if(s->reader) {
-            s->reader->resume();
+            auto reader = s->reader;
+            s->reader = nullptr;
+            reader->resume();
         }
     }
 
@@ -98,10 +102,10 @@ struct awaiter {
     constexpr inline static bool is_pipe_v = std::is_same_v<tag, pipe_acceptor_t>;
     using stream_t = std::conditional_t<is_pipe_v, pipe, tcp_socket>;
     using handle_type = std::conditional_t<is_pipe_v, uv_pipe_t, uv_tcp_t>;
-    using promise_t = task<std::expected<stream_t, std::error_code>>::promise_type;
+    using promise_t = task<result<stream_t>>::promise_type;
 
     acceptor<stream_t>* self;
-    std::expected<stream_t, std::error_code> result = std::unexpected(std::error_code());
+    result<stream_t> outcome = std::unexpected(error());
 
     static int init_stream(stream_t& stream, uv_loop_t* loop) {
         if constexpr(is_pipe_v) {
@@ -121,7 +125,7 @@ struct awaiter {
     }
 
     static void on_connection(acceptor<stream_t>& listener, uv_stream_t* server, int status) {
-        auto deliver = [&](std::expected<stream_t, std::error_code>&& value) {
+        auto deliver = [&](result<stream_t>&& value) {
             if(listener.waiter && listener.active) {
                 *listener.active = std::move(value);
 
@@ -136,7 +140,7 @@ struct awaiter {
         };
 
         if(status < 0) {
-            deliver(std::unexpected(uv_error(status)));
+            deliver(std::unexpected(error(status)));
             return;
         }
 
@@ -151,7 +155,7 @@ struct awaiter {
         }
 
         if(err != 0) {
-            deliver(std::unexpected(uv_error(err)));
+            deliver(std::unexpected(error(err)));
         } else {
             deliver(std::move(conn));
         }
@@ -163,19 +167,56 @@ struct awaiter {
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_t> waiting) noexcept {
         self->waiter = waiting ? &waiting.promise() : nullptr;
-        self->active = &result;
+        self->active = &outcome;
         return std::noop_coroutine();
     }
 
-    std::expected<stream_t, std::error_code> await_resume() noexcept {
+    result<stream_t> await_resume() noexcept {
         self->waiter = nullptr;
         self->active = nullptr;
-        return std::move(result);
+        return std::move(outcome);
     }
 };
 
 template <typename Stream>
-task<std::expected<Stream, std::error_code>> acceptor<Stream>::accept() {
+acceptor<Stream>::acceptor(acceptor&& other) noexcept :
+    handle(std::move(other)), waiter(other.waiter), active(other.active),
+    pending(std::move(other.pending)) {
+    other.waiter = nullptr;
+    other.active = nullptr;
+
+    if(initialized()) {
+        if(auto* h = as<uv_handle_t>()) {
+            h->data = this;
+        }
+    }
+}
+
+template <typename Stream>
+acceptor<Stream>& acceptor<Stream>::operator=(acceptor&& other) noexcept {
+    if(this == &other) {
+        return *this;
+    }
+
+    handle::operator=(std::move(other));
+    waiter = other.waiter;
+    active = other.active;
+    pending = std::move(other.pending);
+
+    other.waiter = nullptr;
+    other.active = nullptr;
+
+    if(initialized()) {
+        if(auto* h = as<uv_handle_t>()) {
+            h->data = this;
+        }
+    }
+
+    return *this;
+}
+
+template <typename Stream>
+task<result<Stream>> acceptor<Stream>::accept() {
     if(!pending.empty()) {
         auto out = std::move(pending.front());
         pending.pop_front();
@@ -183,7 +224,7 @@ task<std::expected<Stream, std::error_code>> acceptor<Stream>::accept() {
     }
 
     if(waiter != nullptr) {
-        co_return std::unexpected(uv_error(UV_EALREADY));
+        co_return std::unexpected(error::connection_already_in_progress);
     }
 
     if constexpr(std::is_same_v<Stream, pipe>) {
@@ -196,20 +237,20 @@ task<std::expected<Stream, std::error_code>> acceptor<Stream>::accept() {
 template class acceptor<pipe>;
 template class acceptor<tcp_socket>;
 
-std::expected<pipe, std::error_code> pipe::open(event_loop& loop, int fd) {
+result<pipe> pipe::open(event_loop& loop, int fd) {
     auto h = pipe(sizeof(uv_pipe_t));
 
     auto handle = h.as<uv_pipe_t>();
     int errc = uv_pipe_init(static_cast<uv_loop_t*>(loop.handle()), handle, 0);
     if(errc != 0) {
-        return std::unexpected(uv_error(errc));
+        return std::unexpected(error(errc));
     }
 
     h.mark_initialized();
 
     errc = uv_pipe_open(handle, fd);
     if(errc != 0) {
-        return std::unexpected(uv_error(errc));
+        return std::unexpected(error(errc));
     }
 
     return h;
@@ -236,32 +277,30 @@ static int start_pipe_listen(acceptor<pipe>& acc, event_loop& loop, const char* 
     return err;
 }
 
-std::expected<pipe::acceptor, std::error_code> pipe::listen(event_loop& loop,
-                                                            const char* name,
-                                                            int backlog) {
+result<pipe::acceptor> pipe::listen(event_loop& loop, const char* name, int backlog) {
     pipe::acceptor acc(sizeof(uv_pipe_t));
     int err = start_pipe_listen(acc, loop, name, backlog);
     if(err != 0) {
-        return std::unexpected(uv_error(err));
+        return std::unexpected(error(err));
     }
 
     return acc;
 }
 
-std::expected<tcp_socket, std::error_code> tcp_socket::open(event_loop& loop, int fd) {
+result<tcp_socket> tcp_socket::open(event_loop& loop, int fd) {
     tcp_socket sock(sizeof(uv_tcp_t));
     auto handle = sock.as<uv_tcp_t>();
 
     int err = uv_tcp_init(static_cast<uv_loop_t*>(loop.handle()), handle);
     if(err != 0) {
-        return std::unexpected(uv_error(err));
+        return std::unexpected(error(err));
     }
 
     sock.mark_initialized();
 
     err = uv_tcp_open(handle, fd);
     if(err != 0) {
-        return std::unexpected(uv_error(err));
+        return std::unexpected(error(err));
     }
 
     return sock;
@@ -296,7 +335,7 @@ static int start_tcp_listen(acceptor<tcp_socket>& acc,
     } else if(build_addr(*reinterpret_cast<sockaddr_in*>(&storage), uv_ip4_addr) == 0) {
         addr_ptr = reinterpret_cast<sockaddr*>(&storage);
     } else {
-        return UV_EINVAL;
+        return error::invalid_argument.value();
     }
 
     err = uv_tcp_bind(handle, addr_ptr, flags);
@@ -311,27 +350,27 @@ static int start_tcp_listen(acceptor<tcp_socket>& acc,
     return err;
 }
 
-std::expected<tcp_socket::acceptor, std::error_code> tcp_socket::listen(event_loop& loop,
-                                                                        std::string_view host,
-                                                                        int port,
-                                                                        unsigned int flags,
-                                                                        int backlog) {
+result<tcp_socket::acceptor> tcp_socket::listen(event_loop& loop,
+                                                std::string_view host,
+                                                int port,
+                                                unsigned int flags,
+                                                int backlog) {
     tcp_socket::acceptor acc(sizeof(uv_tcp_t));
     int err = start_tcp_listen(acc, loop, host, port, flags, backlog);
     if(err != 0) {
-        return std::unexpected(uv_error(err));
+        return std::unexpected(error(err));
     }
 
     return acc;
 }
 
-std::expected<console, std::error_code> console::open(event_loop& loop, int fd) {
+result<console> console::open(event_loop& loop, int fd) {
     console con(sizeof(uv_tty_t));
     auto handle = con.as<uv_tty_t>();
 
     int err = uv_tty_init(static_cast<uv_loop_t*>(loop.handle()), handle, fd, 0);
     if(err != 0) {
-        return std::unexpected(uv_error(err));
+        return std::unexpected(error(err));
     }
 
     con.mark_initialized();

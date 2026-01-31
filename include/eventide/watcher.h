@@ -1,9 +1,9 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
-#include <expected>
-#include <system_error>
 
+#include "error.h"
 #include "handle.h"
 #include "task.h"
 
@@ -22,17 +22,16 @@ private:
     friend struct awaiter;
 
 public:
-    static std::expected<timer, std::error_code> create(event_loop& loop);
+    static timer create(event_loop& loop);
 
-    std::error_code start(std::uint64_t timeout_ms, std::uint64_t repeat_ms = 0);
+    void start(std::chrono::milliseconds timeout, std::chrono::milliseconds repeat = {});
 
-    std::error_code stop();
+    void stop();
 
-    task<std::error_code> wait();
+    task<> wait();
 
 private:
     async_node* waiter = nullptr;
-    std::error_code* active = nullptr;
     int pending = 0;
 };
 
@@ -44,17 +43,16 @@ private:
     friend struct awaiter;
 
 public:
-    static std::expected<idle, std::error_code> create(event_loop& loop);
+    static idle create(event_loop& loop);
 
-    std::error_code start();
+    void start();
 
-    std::error_code stop();
+    void stop();
 
-    task<std::error_code> wait();
+    task<> wait();
 
 private:
     async_node* waiter = nullptr;
-    std::error_code* active = nullptr;
     int pending = 0;
 };
 
@@ -66,17 +64,16 @@ private:
     friend struct awaiter;
 
 public:
-    static std::expected<prepare, std::error_code> create(event_loop& loop);
+    static prepare create(event_loop& loop);
 
-    std::error_code start();
+    void start();
 
-    std::error_code stop();
+    void stop();
 
-    task<std::error_code> wait();
+    task<> wait();
 
 private:
     async_node* waiter = nullptr;
-    std::error_code* active = nullptr;
     int pending = 0;
 };
 
@@ -88,17 +85,16 @@ private:
     friend struct awaiter;
 
 public:
-    static std::expected<check, std::error_code> create(event_loop& loop);
+    static check create(event_loop& loop);
 
-    std::error_code start();
+    void start();
 
-    std::error_code stop();
+    void stop();
 
-    task<std::error_code> wait();
+    task<> wait();
 
 private:
     async_node* waiter = nullptr;
-    std::error_code* active = nullptr;
     int pending = 0;
 };
 
@@ -110,18 +106,20 @@ private:
     friend struct awaiter;
 
 public:
-    static std::expected<signal, std::error_code> create(event_loop& loop);
+    static result<signal> create(event_loop& loop);
 
-    std::error_code start(int signum);
+    error start(int signum);
 
-    std::error_code stop();
+    error stop();
 
-    task<std::error_code> wait();
+    task<error> wait();
 
 private:
     async_node* waiter = nullptr;
-    std::error_code* active = nullptr;
+    error* active = nullptr;
     int pending = 0;
 };
+
+task<> sleep(event_loop& loop, std::chrono::milliseconds timeout);
 
 }  // namespace eventide

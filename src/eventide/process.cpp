@@ -12,6 +12,41 @@ struct process_wait_tag {};
 
 }  // namespace
 
+process::process(process&& other) noexcept :
+    handle(std::move(other)), waiter(other.waiter), active(other.active),
+    completed(std::move(other.completed)) {
+    other.waiter = nullptr;
+    other.active = nullptr;
+
+    if(initialized()) {
+        if(auto* handle = as<uv_process_t>()) {
+            handle->data = this;
+        }
+    }
+}
+
+process& process::operator=(process&& other) noexcept {
+    if(this == &other) {
+        return *this;
+    }
+
+    handle::operator=(std::move(other));
+    waiter = other.waiter;
+    active = other.active;
+    completed = std::move(other.completed);
+
+    other.waiter = nullptr;
+    other.active = nullptr;
+
+    if(initialized()) {
+        if(auto* handle = as<uv_process_t>()) {
+            handle->data = this;
+        }
+    }
+
+    return *this;
+}
+
 template <>
 struct awaiter<process_wait_tag> {
     using promise_t = task<process::wait_result>::promise_type;
@@ -84,8 +119,7 @@ void on_exit_cb(uv_process_t* handle, int64_t exit_status, int term_signal) {
     awaiter<process_wait_tag>::notify(*proc, process::exit_status{exit_status, term_signal});
 }
 
-std::expected<process::spawn_result, std::error_code> process::spawn(event_loop& loop,
-                                                                     const options& opts) {
+result<process::spawn_result> process::spawn(event_loop& loop, const options& opts) {
     spawn_result out{process(sizeof(uv_process_t))};
 
     std::vector<std::string> argv_storage;
@@ -113,11 +147,11 @@ std::expected<process::spawn_result, std::error_code> process::spawn(event_loop&
     std::array<pipe, 3> created_pipes{};
     std::array<uv_stdio_container_t, 3> stdio{};
 
-    auto make_pipe = [&]() -> std::expected<pipe, std::error_code> {
-        pipe out{};
+    auto make_pipe = [&]() -> result<pipe> {
+        pipe out(sizeof(uv_pipe_t));
         int err = uv_pipe_init(static_cast<uv_loop_t*>(loop.handle()), out.as<uv_pipe_t>(), 0);
         if(err != 0) {
-            return std::unexpected(uv_error(err));
+            return std::unexpected(error(err));
         }
 
         out.mark_initialized();
@@ -193,7 +227,8 @@ std::expected<process::spawn_result, std::error_code> process::spawn(event_loop&
     auto proc_handle = out.proc.as<uv_process_t>();
     int err = uv_spawn(static_cast<uv_loop_t*>(loop.handle()), proc_handle, &uv_opts);
     if(err != 0) {
-        return std::unexpected(uv_error(err));
+        out.proc.mark_initialized();
+        return std::unexpected(error(err));
     }
 
     out.proc.mark_initialized();
@@ -212,7 +247,7 @@ task<process::wait_result> process::wait() {
     }
 
     if(waiter != nullptr) {
-        co_return std::unexpected(uv_error(UV_EALREADY));
+        co_return std::unexpected(error::socket_is_already_connected);
     }
 
     co_return co_await awaiter<process_wait_tag>{this};
@@ -227,14 +262,14 @@ int process::pid() const noexcept {
     return proc ? proc->pid : -1;
 }
 
-std::error_code process::kill(int signum) {
+error process::kill(int signum) {
     if(!initialized()) {
-        return uv_error(UV_EINVAL);
+        return error::invalid_argument;
     }
 
     int err = uv_process_kill(as<uv_process_t>(), signum);
     if(err != 0) {
-        return uv_error(err);
+        return error(err);
     }
 
     return {};
