@@ -44,6 +44,29 @@ struct promise_result<void> {
     void return_void() noexcept {}
 };
 
+struct promise_exception {
+#ifdef __cpp_exceptions
+    void unhandled_exception() noexcept {
+        this->exception = std::current_exception();
+    }
+
+    void rethrow_if_exception() {
+        if(this->exception) {
+            std::rethrow_exception(this->exception);
+        }
+    }
+
+protected:
+    std::exception_ptr exception{nullptr};
+#else
+    void unhandled_exception() {
+        std::abort();
+    }
+
+    void rethrow_if_exception() {}
+#endif
+};
+
 struct transition_await {
     async_node::State state = async_node::Pending;
 
@@ -81,7 +104,7 @@ public:
 
     using coroutine_handle = std::coroutine_handle<promise_type>;
 
-    struct promise_type : standard_task, promise_result<T> {
+    struct promise_type : standard_task, promise_result<T>, promise_exception {
         auto handle() {
             return coroutine_handle::from_promise(*this);
         }
@@ -96,10 +119,6 @@ public:
 
         auto get_return_object() {
             return task<T>(handle());
-        }
-
-        void unhandled_exception() {
-            std::abort();
         }
 
         promise_type() {
@@ -121,8 +140,9 @@ public:
             return awaitee.h.promise().link_continuation(&awaiter.promise(), location);
         }
 
-        T await_resume() noexcept {
+        T await_resume() {
             auto& promise = awaitee.h.promise();
+            promise.rethrow_if_exception();
             if(promise.state == async_node::Cancelled) {
                 if constexpr(is_cancellation_t<T>) {
                     return std::unexpected(cancellation());
@@ -180,8 +200,10 @@ public:
     }
 
     auto result() {
+        auto&& promise = h.promise();
+        promise.rethrow_if_exception();
         if constexpr(!std::is_void_v<T>) {
-            return std::move(*h.promise().value);
+            return std::move(*promise.value);
         } else {
             return std::nullopt;
         }
