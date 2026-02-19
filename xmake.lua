@@ -10,12 +10,22 @@ option("serde_simdjson", {
 	showmenu = true,
 	description = "Enable simdjson dependency for serde tests/headers",
 })
+option("build_all_tests", {
+	default = false,
+	showmenu = true,
+	description = "Enable all optional unit-test features (CI preset)",
+})
+
+local build_all_tests = has_config("build_all_tests")
+local enable_simdjson = build_all_tests or has_config("serde_simdjson")
 
 if has_config("dev") then
 	-- Don't fetch system package
 	set_policy("package.install_only", true)
 	set_policy("build.ccache", true)
-	if is_mode("debug") then
+	-- Keep Windows toolchains aligned with third-party prebuilt packages (e.g. cpptrace),
+	-- otherwise ASan-specific /failifmismatch metadata can break linking.
+	if is_mode("debug") and not is_plat("windows") then
 		set_policy("build.sanitizer.address", true)
 	end
 
@@ -51,10 +61,10 @@ end
 set_languages("c++23")
 
 add_requires("libuv v1.52.0", "cpptrace v1.0.4")
-if has_config("serde_simdjson") then
+if enable_simdjson then
 	add_requires("simdjson v4.2.4")
 end
-if has_config("test") and is_plat("windows") then
+if (build_all_tests or has_config("test")) and is_plat("windows") then
 	add_requires("unistd_h")
 end
 
@@ -74,7 +84,7 @@ target("eventide", function()
 	add_headerfiles("include/(eventide/*.h)")
 	add_packages("libuv")
 
-	if has_config("serde_simdjson") then
+	if enable_simdjson then
 		add_packages("simdjson", { public = true })
 	end
 end)
@@ -82,16 +92,17 @@ end)
 target("unit_tests", function()
 	set_default(false)
 	set_kind("binary")
-	if has_config("serde_simdjson") then
+	if enable_simdjson then
 		add_files("tests/**.cpp")
+		add_files("src/language/server.cpp", "src/language/transport.cpp")
 		add_packages("simdjson")
 	else
-		add_files("tests/**.cpp|serde/**.cpp")
+		add_files("tests/**.cpp|serde/**.cpp|language/**.cpp")
 	end
 	add_includedirs("include")
 	add_deps("ztest", "eventide")
 
-	if has_config("test") and is_plat("windows") then
+	if (build_all_tests or has_config("test")) and is_plat("windows") then
 		add_packages("unistd_h")
 	end
 
