@@ -48,7 +48,7 @@ jobs:
           xmake config --clean --yes
           --mode=${{ matrix.mode }}
           ${{ matrix.target.config_args }}
-          ${{ runner.os == 'Windows' && format('--sdk={0}/.pixi/envs/default/Library', github.workspace) || '' }}
+          ${{ runner.os == 'Windows' && format('--sdk={0}\.pixi\envs\default\Library', github.workspace) || '' }}
           --dev=y
           --serde_simdjson=y
           --serde_flatbuffers=y
