@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cassert>
+#include <optional>
 #include <ostream>
 #include <span>
 #include <string>
@@ -9,13 +10,13 @@
 #include <type_traits>
 #include <variant>
 #include <vector>
-#include <optional>
+
 #include "opt_specifier.h"
 #include "eventide/common/meta.h"
 
 namespace eventide::option {
-struct OptionEnum {
 
+struct OptionEnum {
     enum OptionClass {
         GroupClass = 0,
         InputClass,
@@ -46,7 +47,6 @@ concept StringOrVariant = std::is_convertible_v<T, std::string_view> ||
 
 template <typename SpellingTy, typename ValueTy>
 struct ParsedArgumentBase {
-
     /// The unique identifier for the option, related to the index in option table.
     OptSpecifier option_id;
     /// the spelling of the argument, eg. "-I", "--optimize"
@@ -185,14 +185,9 @@ struct ParsedArgumentOwning : public ParsedArgumentBase<std::string, std::string
 /// Helper to convert a string_view to an array for storage in the variant.
 inline std::array<char, 8> to_spelling_array(std::string_view str) {
     std::array<char, 8> arr{};
-    if(str.size() >= arr.size()) {
-        // --, -, / cannot exceed the size, therefore it never happen if normal.
-        str.copy(arr.data(), arr.size());
-        arr[arr.size() - 1] = '\0';
-    } else {
-        str.copy(arr.data(), str.size());
-        arr[str.size()] = '\0';
-    }
+    assert(str.size() < arr.size() && "Spelling too long to fit in array");
+    str.copy(arr.data(), str.size());
+    arr[str.size()] = '\0';
     return arr;
 };
 

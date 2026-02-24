@@ -195,12 +195,11 @@ std::expected<ParsedArgs, std::string> parse_with(const BuiltTy& built,
     std::string err;
     table.parse_args(args.argv_storage, [&](std::expected<Parsed, std::string> parsed) {
         if(!parsed.has_value()) {
-            if(err.empty()) {
-                err = parsed.error();
-            }
-            return;
+            err = parsed.error();
+            return false;
         }
         args.parsed.push_back(parsed.value());
+        return true;
     });
     if(!err.empty()) {
         return std::unexpected(err);
