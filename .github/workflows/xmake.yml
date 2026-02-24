@@ -12,9 +12,6 @@ jobs:
         mode: [debug, release]
         target:
           - os: windows-2025
-            toolchain: default
-            config_args: ""
-          - os: windows-2025
             toolchain: clang-cl
             config_args: "--toolchain=clang-cl"
           - os: ubuntu-24.04
