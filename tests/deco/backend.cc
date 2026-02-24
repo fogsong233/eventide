@@ -215,6 +215,7 @@ TEST_SUITE(deco_backend) {
 TEST_CASE(storage_keeps_dummy_alignment_for_id_map) {
     const auto& built = deco::detail::build_storage<ParseAllOpt>();
 
+    EXPECT_TRUE(built.opt_size() > 1);
     EXPECT_TRUE(built.id_map().size() == built.option_infos().size() + 1);
     EXPECT_TRUE(built.category_map().size() == built.id_map().size());
     EXPECT_TRUE(built.id_map()[0] == nullptr);
@@ -256,6 +257,9 @@ TEST_CASE(parse_covers_flag_input_kv_comma_multi) {
     ParseAllOpt opt{};
 
     EXPECT_TRUE(args.size() == 9);
+    if(args.size() != 9) {
+        return;
+    }
 
     EXPECT_TRUE(args[0].get_spelling_view() == "--version");
     EXPECT_TRUE(args[0].values.empty());

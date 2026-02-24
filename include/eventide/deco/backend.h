@@ -674,12 +674,15 @@ consteval auto build_stats() {
 }
 
 template <typename OptDeco>
-consteval const auto& build_storage() {
-    constexpr auto stats = build_stats<OptDeco>();
-    constexpr static OptBuilder<OptDeco, false, stats.opt_count_, stats.strpool_bytes_> builder(
-        std::in_place,
-        stats.strpool_bytes_);
-    return builder;
+struct BuildStorage {
+    inline static constexpr BuildStats stats = build_stats<OptDeco>();
+    using builder_t = OptBuilder<OptDeco, false, stats.opt_count_, stats.strpool_bytes_>;
+    inline static constexpr builder_t value{std::in_place, stats.strpool_bytes_};
+};
+
+template <typename OptDeco>
+constexpr const auto& build_storage() {
+    return BuildStorage<OptDeco>::value;
 }
 
 }  // namespace deco::detail
