@@ -30,6 +30,9 @@ constexpr deco::decl::Category packCategory = {
 };
 
 struct CustomScalarResult {
+    constexpr CustomScalarResult() = default;
+    constexpr ~CustomScalarResult() = default;
+
     std::string value;
 
     std::optional<std::string_view> into(std::string_view input) {
@@ -39,6 +42,9 @@ struct CustomScalarResult {
 };
 
 struct CustomVectorResult {
+    constexpr CustomVectorResult() = default;
+    constexpr ~CustomVectorResult() = default;
+
     std::vector<std::string> values;
 
     std::optional<std::string_view> into(const std::vector<std::string_view>& input) {

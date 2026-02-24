@@ -25,10 +25,14 @@ struct Help {
 
 struct Request {
     struct RequestType {
+        constexpr RequestType() = default;
+        constexpr ~RequestType() = default;
+
         enum class Type {
             Get,
             Post,
         } type;
+
         std::optional<std::string> into(std::string_view input) {
             if (input == "GET" || input == "POST") {
                 type = (input == "GET") ? Type::Get : Type::Post;
@@ -40,7 +44,11 @@ struct Request {
     };
 
     struct Url {
+        constexpr Url() = default;
+        constexpr ~Url() = default;
+
         std::string url;
+
         std::optional<std::string> into(std::string_view input) {
             if (input.starts_with("http://") || input.starts_with("https://")) {
                 url = std::string(input);
