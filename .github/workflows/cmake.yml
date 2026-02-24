@@ -24,13 +24,15 @@ jobs:
           pixi-version: v0.61.0
           activate-environment: true
           cache: true
-
       - name: Configure
         if: runner.os != 'Windows'
         run: >
           cmake -S . -B build-cmake
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DEVENTIDE_BUILD_ALL_TESTS=ON
+          -G Ninja 
+          -DCMAKE_CXX_COMPILER=clang-cl
+          -DCMAKE_C_COMPILER=clang-cl
 
       - name: Configure (windows clang-cl)
         if: runner.os == 'Windows'
@@ -38,7 +40,9 @@ jobs:
           cmake -S . -B build-cmake
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DEVENTIDE_BUILD_ALL_TESTS=ON
-          -G Ninja -DCMAKE_CXX_COMPILER=clang-cl
+          -G Ninja 
+          -DCMAKE_CXX_COMPILER=clang-cl
+          -DCMAKE_C_COMPILER=clang-cl
 
       - name: Build
         if: runner.os != 'Windows'
