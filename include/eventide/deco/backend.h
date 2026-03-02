@@ -474,7 +474,7 @@ private:
                                                  accessor_fn mapped_accessor,
                                                  std::string_view field_name,
                                                  const decl::KVFields& fields) {
-        auto& base_item = item_by_id(item_id);
+        const auto base_item = item_by_id(item_id);
         auto& alias = new_item(mapped_accessor);
         auto alias_id = alias.id;
         alias = base_item;
