@@ -503,7 +503,7 @@ private:
             set_common_options(item, fields);
             set_category_for_item(item.id, category);
             add_generated_kv_joined_alias(item.id, mapped_accessor, field_name, fields);
-            return item;
+            return item_by_id(item_id);
         }
 
         set_kv_name_and_kind(item, fields.names.front());
