@@ -1,6 +1,9 @@
 #pragma once
 
+#include <array>
 #include <limits>
+#include <memory>
+#include <variant>
 
 #include "annotation.h"
 #include "attrs.h"
@@ -17,6 +20,57 @@ struct serialize_traits;
 
 template <typename D, typename T>
 struct deserialize_traits;
+
+template <serializer_like S, typename V, typename T, typename E>
+constexpr auto serialize(S& s, const V& v) -> std::expected<T, E>;
+
+template <deserializer_like D, typename V, typename E>
+constexpr auto deserialize(D& d, V& v) -> std::expected<void, E>;
+
+template <typename S, typename T, std::size_t N>
+struct serialize_traits<S, std::array<T, N>> {
+    using value_type = typename S::value_type;
+    using error_type = typename S::error_type;
+
+    static auto serialize(S& serializer, const std::array<T, N>& value)
+        -> std::expected<value_type, error_type> {
+        auto tuple = serializer.serialize_tuple(N);
+        if(!tuple) {
+            return std::unexpected(tuple.error());
+        }
+
+        for(const auto& element: value) {
+            auto status = tuple->serialize_element(element);
+            if(!status) {
+                return std::unexpected(status.error());
+            }
+        }
+
+        return tuple->end();
+    }
+};
+
+template <typename D, typename T, std::size_t N>
+struct deserialize_traits<D, std::array<T, N>> {
+    using error_type = typename D::error_type;
+
+    static auto deserialize(D& deserializer, std::array<T, N>& value)
+        -> std::expected<void, error_type> {
+        auto tuple = deserializer.deserialize_tuple(N);
+        if(!tuple) {
+            return std::unexpected(tuple.error());
+        }
+
+        for(auto& element: value) {
+            auto status = tuple->deserialize_element(element);
+            if(!status) {
+                return std::unexpected(status.error());
+            }
+        }
+
+        return tuple->end();
+    }
+};
 
 namespace detail {
 
@@ -194,13 +248,21 @@ constexpr auto serialize(S& s, const V& v) -> std::expected<T, E> {
     } else if constexpr(bytes_like<V>) {
         return s.serialize_bytes(v);
     } else if constexpr(std::same_as<V, std::nullptr_t>) {
-        return s.serialize_none();
+        return s.serialize_null();
+    } else if constexpr(std::same_as<V, std::monostate>) {
+        return s.serialize_null();
     } else if constexpr(is_specialization_of<std::optional, V>) {
         if(v.has_value()) {
             return s.serialize_some(v.value());
         } else {
-            return s.serialize_none();
+            return s.serialize_null();
         }
+    } else if constexpr(is_specialization_of<std::unique_ptr, V> ||
+                        is_specialization_of<std::shared_ptr, V>) {
+        if(v) {
+            return s.serialize_some(*v);
+        }
+        return s.serialize_null();
     } else if constexpr(is_specialization_of<std::variant, V>) {
         return s.serialize_variant(v);
     } else if constexpr(std::ranges::input_range<V>) {
@@ -361,6 +423,16 @@ constexpr auto deserialize(D& d, V& v) -> std::expected<void, E> {
             return {};
         }
         return std::unexpected(E{});
+    } else if constexpr(std::same_as<V, std::monostate>) {
+        auto is_none = d.deserialize_none();
+        if(!is_none) {
+            return std::unexpected(is_none.error());
+        }
+        if(*is_none) {
+            v = std::monostate{};
+            return {};
+        }
+        return std::unexpected(E{});
     } else if constexpr(is_specialization_of<std::optional, V>) {
         auto is_none = d.deserialize_none();
         if(!is_none) {
@@ -374,12 +446,12 @@ constexpr auto deserialize(D& d, V& v) -> std::expected<void, E> {
 
         using value_t = typename V::value_type;
         if(v.has_value()) {
-            return d.deserialize_some(v.value());
+            return deserialize(d, v.value());
         }
 
         if constexpr(std::default_initializable<value_t>) {
             v.emplace();
-            auto status = d.deserialize_some(v.value());
+            auto status = deserialize(d, v.value());
             if(!status) {
                 v.reset();
                 return std::unexpected(status.error());
@@ -389,6 +461,52 @@ constexpr auto deserialize(D& d, V& v) -> std::expected<void, E> {
             static_assert(dependent_false<V>,
                           "cannot auto deserialize optional<T> without default-constructible T");
         }
+    } else if constexpr(is_specialization_of<std::unique_ptr, V>) {
+        auto is_none = d.deserialize_none();
+        if(!is_none) {
+            return std::unexpected(is_none.error());
+        }
+        if(*is_none) {
+            v.reset();
+            return {};
+        }
+
+        using value_t = typename V::element_type;
+        static_assert(std::default_initializable<value_t>,
+                      "cannot auto deserialize unique_ptr<T> without default-constructible T");
+        static_assert(std::same_as<typename V::deleter_type, std::default_delete<value_t>>,
+                      "cannot auto deserialize unique_ptr<T, D> with custom deleter");
+
+        auto value = std::make_unique<value_t>();
+        auto status = deserialize(d, *value);
+        if(!status) {
+            return std::unexpected(status.error());
+        }
+
+        v = std::move(value);
+        return {};
+    } else if constexpr(is_specialization_of<std::shared_ptr, V>) {
+        auto is_none = d.deserialize_none();
+        if(!is_none) {
+            return std::unexpected(is_none.error());
+        }
+        if(*is_none) {
+            v.reset();
+            return {};
+        }
+
+        using value_t = typename V::element_type;
+        static_assert(std::default_initializable<value_t>,
+                      "cannot auto deserialize shared_ptr<T> without default-constructible T");
+
+        auto value = std::make_shared<value_t>();
+        auto status = deserialize(d, *value);
+        if(!status) {
+            return std::unexpected(status.error());
+        }
+
+        v = std::move(value);
+        return {};
     } else if constexpr(is_specialization_of<std::variant, V>) {
         return d.deserialize_variant(v);
     } else if constexpr(std::ranges::input_range<V>) {
@@ -559,5 +677,44 @@ constexpr auto deserialize(D& d, V& v) -> std::expected<void, E> {
                       "cannot auto deserialize the value, try to specialize for it");
     }
 }
+
+namespace detail {
+
+/// Shared implementation: deserialize bytes as a sequence of uint8 values.
+/// Used by JSON (simd, yy) and TOML backends that represent bytes as arrays.
+template <deserializer_like D>
+auto deserialize_bytes_from_seq(D& d, std::vector<std::byte>& value)
+    -> std::expected<void, typename D::error_type> {
+    auto seq = d.deserialize_seq(std::nullopt);
+    if(!seq) {
+        return std::unexpected(seq.error());
+    }
+
+    value.clear();
+    while(true) {
+        auto has_next = seq->has_next();
+        if(!has_next) {
+            return std::unexpected(has_next.error());
+        }
+        if(!*has_next) {
+            break;
+        }
+
+        std::uint64_t byte = 0;
+        auto byte_status = seq->deserialize_element(byte);
+        if(!byte_status) {
+            return std::unexpected(byte_status.error());
+        }
+        if(byte > static_cast<std::uint64_t>((std::numeric_limits<std::uint8_t>::max)())) {
+            return unexpected_number_out_of_range<std::expected<void, typename D::error_type>>();
+        }
+
+        value.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(byte)));
+    }
+
+    return seq->end();
+}
+
+}  // namespace detail
 
 }  // namespace eventide::serde
