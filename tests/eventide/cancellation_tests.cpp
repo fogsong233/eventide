@@ -38,7 +38,7 @@ TEST_CASE(pass_through_value) {
         co_return 42;
     };
 
-    auto [result] = run(with_token(source.token(), worker()));
+    auto [result] = run(with_token(worker(), source.token()));
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, 42);
 }
@@ -53,7 +53,7 @@ TEST_CASE(pre_cancel_skip) {
         co_return 1;
     };
 
-    auto [result] = run(with_token(source.token(), worker()));
+    auto [result] = run(with_token(worker(), source.token()));
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(started, 0);
 }
@@ -82,7 +82,7 @@ TEST_CASE(cancel_in_flight) {
         gate.set();
     };
 
-    auto guarded_task = with_token(source.token(), worker());
+    auto guarded_task = with_token(worker(), source.token());
     auto cancel_task = canceler();
     auto release_task = releaser();
 
@@ -172,8 +172,8 @@ TEST_CASE(queue_cancel_resume) {
         co_await start_target.wait();
         target_submitted.set();
         auto res = co_await with_token(
-            source.token(),
-            queue([&] { target_started.store(true, std::memory_order_release); }, loop));
+            queue([&] { target_started.store(true, std::memory_order_release); }, loop),
+            source.token());
         target_cancelled = !res.has_value();
         observed_phase = phase;
         target_done.set();
@@ -255,7 +255,7 @@ TEST_CASE(fs_cancel_resume) {
     auto target = [&]() -> task<> {
         co_await start_target.wait();
         target_submitted.set();
-        auto res = co_await with_token(source.token(), fs::stat(".", loop));
+        auto res = co_await with_token(fs::stat(".", loop), source.token());
         target_cancelled = !res.has_value();
         observed_phase = phase;
         target_done.set();
@@ -322,7 +322,7 @@ TEST_CASE(cancel_waiting_on_event) {
         source.cancel();
     };
 
-    auto guarded = with_token(source.token(), worker());
+    auto guarded = with_token(worker(), source.token());
     auto cancel_task = canceler();
 
     loop.schedule(guarded);
@@ -365,7 +365,7 @@ TEST_CASE(cancel_waiting_on_mutex) {
     };
 
     auto holder_task = holder();
-    auto guarded = with_token(source.token(), worker());
+    auto guarded = with_token(worker(), source.token());
     auto cancel_task = canceler();
 
     loop.schedule(holder_task);
@@ -401,7 +401,7 @@ TEST_CASE(cancel_semaphore_waiter) {
         source.cancel();
     };
 
-    auto guarded = with_token(source.token(), worker());
+    auto guarded = with_token(worker(), source.token());
     auto cancel_task = canceler();
 
     loop.schedule(guarded);
@@ -439,7 +439,7 @@ TEST_CASE(cancel_condition_variable_waiter) {
         source.cancel();
     };
 
-    auto guarded = with_token(source.token(), worker());
+    auto guarded = with_token(worker(), source.token());
     auto cancel_task = canceler();
 
     loop.schedule(guarded);
@@ -471,9 +471,9 @@ TEST_CASE(cancel_multiple_registered_tasks) {
     };
 
     auto token = source.token();
-    auto g1 = with_token(token, make_worker(gate1));
-    auto g2 = with_token(token, make_worker(gate2));
-    auto g3 = with_token(token, make_worker(gate3));
+    auto g1 = with_token(make_worker(gate1), token);
+    auto g2 = with_token(make_worker(gate2), token);
+    auto g3 = with_token(make_worker(gate3), token);
     auto cancel_task = canceler();
 
     loop.schedule(g1);
@@ -507,7 +507,7 @@ TEST_CASE(nested_with_token) {
             outer_source.cancel();
         };
 
-        auto guarded = with_token(outer_source.token(), with_token(inner_source.token(), worker()));
+        auto guarded = with_token(with_token(worker(), inner_source.token()), outer_source.token());
         auto cancel_task = canceler();
 
         loop.schedule(guarded);
@@ -534,7 +534,7 @@ TEST_CASE(nested_with_token) {
             inner_source.cancel();
         };
 
-        auto guarded = with_token(outer_source.token(), with_token(inner_source.token(), worker()));
+        auto guarded = with_token(with_token(worker(), inner_source.token()), outer_source.token());
         auto cancel_task = canceler();
 
         loop.schedule(guarded);
@@ -559,12 +559,103 @@ TEST_CASE(token_reuse_after_cancel) {
     };
 
     // Create new task with already-cancelled token
-    auto [result] = run(with_token(source.token(), worker()));
+    auto [result] = run(with_token(worker(), source.token()));
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(started, 0);
 
     // registration.cancelled() returns true
     EXPECT_TRUE(source.cancelled());
+}
+
+TEST_CASE(multi_token_cancel_first) {
+    event_loop loop;
+    cancellation_source source1;
+    cancellation_source source2;
+    event gate;
+    bool finished = false;
+
+    auto worker = [&]() -> task<int> {
+        co_await gate.wait();
+        finished = true;
+        co_return 42;
+    };
+
+    auto canceler = [&]() -> task<> {
+        co_await sleep(std::chrono::milliseconds{1}, loop);
+        source1.cancel();
+    };
+
+    auto guarded = with_token(worker(), source1.token(), source2.token());
+    auto cancel_task = canceler();
+
+    loop.schedule(guarded);
+    loop.schedule(cancel_task);
+    loop.run();
+
+    EXPECT_FALSE(finished);
+    EXPECT_FALSE(guarded.value().has_value());
+    EXPECT_TRUE(source1.cancelled());
+    EXPECT_FALSE(source2.cancelled());
+}
+
+TEST_CASE(multi_token_cancel_second) {
+    event_loop loop;
+    cancellation_source source1;
+    cancellation_source source2;
+    event gate;
+    bool finished = false;
+
+    auto worker = [&]() -> task<int> {
+        co_await gate.wait();
+        finished = true;
+        co_return 42;
+    };
+
+    auto canceler = [&]() -> task<> {
+        co_await sleep(std::chrono::milliseconds{1}, loop);
+        source2.cancel();
+    };
+
+    auto guarded = with_token(worker(), source1.token(), source2.token());
+    auto cancel_task = canceler();
+
+    loop.schedule(guarded);
+    loop.schedule(cancel_task);
+    loop.run();
+
+    EXPECT_FALSE(finished);
+    EXPECT_FALSE(guarded.value().has_value());
+    EXPECT_FALSE(source1.cancelled());
+    EXPECT_TRUE(source2.cancelled());
+}
+
+TEST_CASE(multi_token_pre_cancel) {
+    cancellation_source source1;
+    cancellation_source source2;
+    source2.cancel();
+
+    int started = 0;
+    auto worker = [&]() -> task<int> {
+        started += 1;
+        co_return 1;
+    };
+
+    auto [result] = run(with_token(worker(), source1.token(), source2.token()));
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(started, 0);
+}
+
+TEST_CASE(multi_token_pass_through) {
+    cancellation_source source1;
+    cancellation_source source2;
+
+    auto worker = []() -> task<int> {
+        co_return 99;
+    };
+
+    auto [result] = run(with_token(worker(), source1.token(), source2.token()));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 99);
 }
 
 };  // TEST_SUITE(cancellation)
