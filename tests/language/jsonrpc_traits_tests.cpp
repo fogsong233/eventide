@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "../ipc/test_transport.h"
 #include "eventide/ipc/peer.h"
 #include "eventide/zest/zest.h"
 #include "eventide/common/compiler.h"
@@ -17,6 +18,9 @@
 namespace eventide::language {
 
 namespace ipc = eventide::ipc;
+
+using ipc::FakeTransport;
+using ipc::ScriptedTransport;
 
 struct AddParams {
     std::int64_t a = 0;
@@ -59,104 +63,18 @@ struct RPCNotification {
     NoteParams params;
 };
 
-class FakeTransport final : public ipc::Transport {
-public:
-    explicit FakeTransport(std::vector<std::string> incoming) :
-        incoming_messages(std::move(incoming)) {}
-
-    task<std::optional<std::string>> read_message() override {
-        if(read_index >= incoming_messages.size()) {
-            co_return std::nullopt;
-        }
-        co_return incoming_messages[read_index++];
-    }
-
-    task<ipc::Result<void>> write_message(std::string_view payload) override {
-        outgoing_messages.emplace_back(payload);
-        co_return ipc::Result<void>{};
-    }
-
-    const std::vector<std::string>& outgoing() const {
-        return outgoing_messages;
-    }
-
-private:
-    std::vector<std::string> incoming_messages;
-    std::vector<std::string> outgoing_messages;
-    std::size_t read_index = 0;
-};
-
-class ScriptedTransport final : public ipc::Transport {
-public:
-    using WriteHook = std::function<void(std::string_view, ScriptedTransport&)>;
-
-    ScriptedTransport(std::vector<std::string> incoming, WriteHook hook) :
-        incoming_messages(std::move(incoming)), write_hook(std::move(hook)) {
-        if(!incoming_messages.empty()) {
-            readable.set();
-        }
-    }
-
-    task<std::optional<std::string>> read_message() override {
-        while(read_index >= incoming_messages.size()) {
-            if(closed) {
-                co_return std::nullopt;
-            }
-
-            co_await readable.wait();
-            readable.reset();
-        }
-
-        co_return incoming_messages[read_index++];
-    }
-
-    task<ipc::Result<void>> write_message(std::string_view payload) override {
-        outgoing_messages.emplace_back(payload);
-        if(write_hook) {
-            write_hook(payload, *this);
-        }
-        co_return ipc::Result<void>{};
-    }
-
-    void push_incoming(std::string payload) {
-        incoming_messages.push_back(std::move(payload));
-        readable.set();
-    }
-
-    void close() {
-        closed = true;
-        readable.set();
-    }
-
-    const std::vector<std::string>& outgoing() const {
-        return outgoing_messages;
-    }
-
-private:
-    std::vector<std::string> incoming_messages;
-    std::vector<std::string> outgoing_messages;
-    std::size_t read_index = 0;
-    WriteHook write_hook;
-    event readable;
-    bool closed = false;
-};
-
 }  // namespace eventide::language
 
-namespace eventide::ipc::protocol {
-
 template <>
-struct RequestTraits<eventide::language::AddParams> {
+struct eventide::ipc::protocol::RequestTraits<eventide::language::AddParams> {
     using Result = eventide::language::AddResult;
     constexpr inline static std::string_view method = "test/add";
 };
 
 template <>
-struct NotificationTraits<eventide::language::NoteParams> {
+struct eventide::ipc::protocol::NotificationTraits<eventide::language::NoteParams> {
     constexpr inline static std::string_view method = "test/note";
 };
-
-}  // namespace eventide::ipc::protocol
 
 namespace eventide::language {
 
@@ -299,27 +217,27 @@ TEST_CASE(request_notify_apis) {
         auto notify_from_context =
             context->send_notification("client/note/context", CustomNoteParams{.text = "context"});
         if(!notify_from_context) {
-            co_return std::unexpected(notify_from_context.error());
+            co_return outcome_error(notify_from_context.error());
         }
 
         auto notify_from_server =
             peer.send_notification("client/note/server", CustomNoteParams{.text = "server"});
         if(!notify_from_server) {
-            co_return std::unexpected(notify_from_server.error());
+            co_return outcome_error(notify_from_server.error());
         }
 
         auto context_result = co_await context->send_request<AddResult>(
             "client/add/context",
             CustomAddParams{.a = params.a, .b = params.b});
         if(!context_result) {
-            co_return std::unexpected(context_result.error());
+            co_return outcome_error(context_result.error());
         }
 
         auto server_result =
             co_await peer.send_request<AddResult>("client/add/server",
                                                   CustomAddParams{.a = params.b, .b = 1});
         if(!server_result) {
-            co_return std::unexpected(server_result.error());
+            co_return outcome_error(server_result.error());
         }
 
         co_return AddResult{.sum = context_result->sum + server_result->sum};

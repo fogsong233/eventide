@@ -2,7 +2,6 @@
 
 #include <cassert>
 #include <cstddef>
-#include <expected>
 #include <source_location>
 
 #include "frame.h"
@@ -48,15 +47,8 @@ protected:
         return link;
     }
 
-    template <typename Fn>
-    void drain_waiters(Fn&& fn) {
-        auto* cur = head;
-        while(cur) {
-            auto* next = cur->next;
-            remove(cur);
-            fn(cur);
-            cur = next;
-        }
+    bool front_waiter_matches(std::size_t snapshot) const noexcept {
+        return head && head->generation == snapshot;
     }
 
     bool resume_waiter(waiter_link* link) noexcept {
@@ -75,10 +67,42 @@ protected:
 
     bool cancel_waiter(waiter_link* link) noexcept;
 
+    /// Processes the waiters that were already queued when this call began.
+    ///
+    /// The callback is allowed to synchronously resume user code, so it may
+    /// mutate the same wait queue re-entrantly. Using a generation snapshot
+    /// keeps the walk stable without stashing sibling waiter pointers that may
+    /// become dangling before the next iteration.
+    template <typename Fn>
+    void drain_waiter_snapshot(Fn&& fn) {
+        const auto snapshot = begin_waiter_snapshot();
+        while(front_waiter_matches(snapshot)) {
+            fn(pop_waiter());
+        }
+    }
+
+    /// Starts a logical "snapshot" of the current wait queue.
+    ///
+    /// We do not materialize that snapshot into a temporary container: doing so
+    /// would keep raw waiter pointers alive across synchronous resumes, and one
+    /// resumed waiter is allowed to cancel/destroy sibling waiters immediately.
+    /// Instead, each queued waiter is tagged with the current generation. An
+    /// interrupt bumps the generation once, then keeps popping from the front
+    /// only while the head still belongs to the old generation.
+    std::size_t begin_waiter_snapshot() noexcept {
+        auto snapshot = waiter_generation;
+        waiter_generation += 1;
+        return snapshot;
+    }
+
 private:
     /// Head and tail of the intrusive doubly-linked waiter queue.
     waiter_link* head = nullptr;
     waiter_link* tail = nullptr;
+
+    /// Monotonic tag used to distinguish "already queued" waiters from
+    /// re-entrantly added waiters during interrupt().
+    std::size_t waiter_generation = 0;
 };
 
 class mutex : public sync_primitive {
@@ -235,9 +259,9 @@ public:
             return link_continuation(&awaiter.promise(), location);
         }
 
-        std::expected<void, cancellation> await_resume() noexcept {
+        outcome<void, void, cancellation> await_resume() noexcept {
             if(this->state == async_node::Cancelled) {
-                return std::unexpected(cancellation{});
+                return detail::cancel_box<cancellation>{cancellation{}};
             }
 
             return {};
@@ -251,14 +275,14 @@ public:
     /// cancellation is propagated through the returned task.
     task<> wait() {
         auto result = co_await wait_awaiter(*this);
-        if(!result.has_value()) {
+        if(result.is_cancelled()) {
             co_await cancel();
         }
     }
 
     void set() noexcept {
         signaled = true;
-        drain_waiters([this](waiter_link* waiter) { resume_waiter(waiter); });
+        drain_waiter_snapshot([this](waiter_link* waiter) { resume_waiter(waiter); });
     }
 
     void reset() noexcept {
@@ -267,7 +291,10 @@ public:
 
     /// Interrupts the current wait queue without changing the signaled state.
     void interrupt() noexcept {
-        drain_waiters([this](waiter_link* waiter) { cancel_waiter(waiter); });
+        // cancel_waiter() resumes user code synchronously. New waits may be
+        // linked before we return, but they belong to a newer generation and
+        // are excluded by drain_waiter_snapshot().
+        drain_waiter_snapshot([this](waiter_link* waiter) { cancel_waiter(waiter); });
     }
 
     bool is_set() const noexcept {
@@ -336,7 +363,7 @@ public:
     }
 
     void notify_all() {
-        drain_waiters([this](waiter_link* waiter) { resume_waiter(waiter); });
+        drain_waiter_snapshot([this](waiter_link* waiter) { resume_waiter(waiter); });
     }
 };
 

@@ -2,6 +2,7 @@
 #include <chrono>
 #include <concepts>
 #include <cstdlib>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -99,13 +100,10 @@ TEST_CASE(cancel_in_flight) {
 }
 
 TEST_CASE(destructor_cancels_tokens) {
-    cancellation_token token;
-    {
-        cancellation_source source;
-        token = source.token();
-        EXPECT_FALSE(token.cancelled());
-    }
-
+    std::optional<cancellation_source> source(std::in_place);
+    auto token = source->token();
+    EXPECT_FALSE(token.cancelled());
+    source.reset();
     EXPECT_TRUE(token.cancelled());
 }
 
@@ -120,22 +118,6 @@ TEST_CASE(token_share_state) {
     source.cancel();
     EXPECT_TRUE(token_a.cancelled());
     EXPECT_TRUE(token_b.cancelled());
-}
-
-TEST_CASE(move_assign_cancel) {
-    cancellation_source lhs;
-    auto lhs_token = lhs.token();
-
-    cancellation_source rhs;
-    auto rhs_token = rhs.token();
-
-    lhs = std::move(rhs);
-
-    EXPECT_TRUE(lhs_token.cancelled());
-    EXPECT_FALSE(rhs_token.cancelled());
-
-    lhs.cancel();
-    EXPECT_TRUE(rhs_token.cancelled());
 }
 
 TEST_CASE(queue_cancel_resume) {
@@ -219,7 +201,9 @@ TEST_CASE(queue_cancel_resume) {
     loop.run();
 
     EXPECT_TRUE(target_cancelled);
-    EXPECT_EQ(observed_phase, 2);
+    // Event-based cancellation is synchronous: the target resumes within
+    // source.cancel(), before phase is advanced to 2.
+    EXPECT_EQ(observed_phase, 1);
     EXPECT_FALSE(target_started.load(std::memory_order_acquire));
 }
 
@@ -301,7 +285,7 @@ TEST_CASE(fs_cancel_resume) {
     loop.run();
 
     EXPECT_TRUE(target_cancelled);
-    EXPECT_EQ(observed_phase, 2);
+    EXPECT_EQ(observed_phase, 1);
 }
 
 TEST_CASE(cancel_waiting_on_event) {
@@ -681,6 +665,35 @@ TEST_CASE(multi_token_pass_through) {
     auto [result] = run(with_token(worker(), source1.token(), source2.token()));
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, 99);
+}
+
+TEST_CASE(nested_with_token_same_token_cancel) {
+    event_loop loop;
+    cancellation_source source;
+    auto token = source.token();
+    event gate;
+    event inner_started;
+
+    auto inner_work = [&]() -> task<> {
+        inner_started.set();
+        co_await gate.wait();
+    };
+
+    auto outer_work = [&](cancellation_token t) -> task<> {
+        co_await with_token(inner_work(), t);
+    };
+
+    auto guarded = with_token(outer_work(token), token);
+
+    auto canceler = [&]() -> task<> {
+        co_await inner_started.wait();
+        source.cancel();
+        co_return;
+    };
+
+    loop.schedule(guarded);
+    loop.schedule(canceler());
+    EXPECT_EQ(loop.run(), 0);
 }
 
 };  // TEST_SUITE(cancellation)

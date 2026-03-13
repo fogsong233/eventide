@@ -9,8 +9,32 @@
 
 namespace eventide {
 
-/// Tracks the most recently resumed task (used for debugging/profiling).
-static thread_local async_node* current_node = nullptr;
+void async_node::intercept_cancel() noexcept {
+    policy = static_cast<Policy>(policy | InterceptCancel);
+}
+
+std::coroutine_handle<> aggregate_op::deliver_deferred() noexcept {
+    if(deferred == Deferred::None || !awaiter) {
+        return std::noop_coroutine();
+    }
+
+    phase = Phase::Settled;
+
+    assert(awaiter->is_standard_task() && "aggregate awaiter must be a task");
+    awaiter->clear_awaitee();
+
+    switch(deferred) {
+        case Deferred::Resume: return static_cast<standard_task*>(awaiter)->handle();
+
+        case Deferred::Cancel: awaiter->state = Cancelled; return awaiter->final_transition();
+
+        case Deferred::Error: return static_cast<standard_task*>(awaiter)->handle();
+
+        case Deferred::None: break;
+    }
+
+    std::abort();
+}
 
 void async_node::clear_awaitee() noexcept {
     if(kind == NodeKind::Task) {
@@ -19,9 +43,9 @@ void async_node::clear_awaitee() noexcept {
 }
 
 /// Recursively cancels this node and all of its descendants.
-/// Idempotent: re-cancelling an already-cancelled node is a no-op.
+/// Idempotent: re-cancelling an already-cancelled or failed node is a no-op.
 void async_node::cancel() {
-    if(state == Cancelled) {
+    if(state == Cancelled || state == Failed) {
         return;
     }
     state = Cancelled;
@@ -65,11 +89,23 @@ void async_node::cancel() {
         case NodeKind::WhenAny:
         case NodeKind::Scope: {
             auto* self = static_cast<aggregate_op*>(this);
-            self->done = true;
+            const bool was_arming = self->phase == aggregate_op::Phase::Arming;
+            self->phase = aggregate_op::Phase::Cancelling;
             for(auto* child: self->awaitees) {
                 if(child) {
                     child->cancel();
                 }
+            }
+            self->defer_cancel();
+            self->phase = was_arming ? aggregate_op::Phase::Arming : aggregate_op::Phase::Settled;
+
+            if(was_arming) {
+                break;
+            }
+
+            auto next = self->deliver_deferred();
+            if(next) {
+                next.resume();
             }
             break;
         }
@@ -87,7 +123,7 @@ void async_node::cancel() {
 /// Resumes a standard task's coroutine, unless it has been cancelled.
 void async_node::resume() {
     if(is_standard_task()) {
-        if(!is_cancelled()) {
+        if(!is_cancelled() && !is_failed()) {
             static_cast<standard_task*>(this)->handle().resume();
         }
     }
@@ -149,7 +185,7 @@ std::coroutine_handle<> async_node::link_continuation(async_node* awaiter,
     std::abort();
 }
 
-/// Called when a task reaches final_suspend (Finished or Cancelled).
+/// Called when a task reaches final_suspend (Finished, Cancelled, or Failed).
 /// For root tasks with no awaiter, destroys the coroutine frame.
 /// Otherwise, notifies the parent via handle_subtask_result.
 std::coroutine_handle<> async_node::final_transition() {
@@ -179,9 +215,11 @@ std::coroutine_handle<> async_node::final_transition() {
 
 /// Dispatches a child's completion to its parent node.
 ///
-/// For Task parents: resumes the coroutine, or propagates cancellation upward.
+/// For Task parents: resumes the coroutine normally for Finished/Failed,
+///   or propagates cancellation upward.
 /// For Aggregate parents (when_all/when_any/scope):
 ///   - Cancellation: cancels all siblings, propagates upward.
+///   - Failed (exception/propagating error): cancels all siblings, resumes awaiter.
 ///   - WhenAny completion: records winner, cancels siblings, resumes awaiter.
 ///   - WhenAll/Scope completion: increments counter, resumes awaiter when all done.
 std::coroutine_handle<> async_node::handle_subtask_result(async_node* child) {
@@ -191,18 +229,9 @@ std::coroutine_handle<> async_node::handle_subtask_result(async_node* child) {
         case NodeKind::Task: {
             auto self = static_cast<standard_task*>(this);
 
-            if(child->state == Finished) {
-                self->awaitee = nullptr;
-                current_node = self;
-                return self->handle();
-            }
-
             if(child->state == Cancelled) {
-                /// InterceptCancel: the parent handles cancellation explicitly
-                /// (e.g., catch_cancel() or with_token()). Resume as normal.
                 if(child->policy & InterceptCancel) {
                     self->awaitee = nullptr;
-                    current_node = self;
                     return self->handle();
                 }
 
@@ -211,21 +240,51 @@ std::coroutine_handle<> async_node::handle_subtask_result(async_node* child) {
                 return self->final_transition();
             }
 
-            std::abort();
+            // Finished or Failed: resume parent normally.
+            // await_resume handles exceptions (rethrow_if_exception)
+            // and errors (explicit return value inspection).
+            self->awaitee = nullptr;
+            return self->handle();
         }
 
         case NodeKind::WhenAll:
         case NodeKind::WhenAny:
         case NodeKind::Scope: {
             auto self = static_cast<aggregate_op*>(this);
-            if(self->done) {
+            if(self->is_settled()) {
                 return std::noop_coroutine();
             }
 
             const bool cancelled = child->state == Cancelled && !(child->policy & InterceptCancel);
-            if(cancelled) {
-                self->done = true;
-                self->pending_cancel = true;
+
+            const bool failed = child->state == Failed;
+
+            if(cancelled || failed) {
+                if(cancelled) {
+                    self->defer_cancel();
+                }
+                if(failed) {
+                    const bool first_error = self->deferred != aggregate_op::Deferred::Error;
+                    self->defer_error();
+                    if(first_error && child->propagated_exception) {
+                        self->propagated_exception = child->propagated_exception;
+                    }
+                    if(first_error && self->kind == NodeKind::WhenAny &&
+                       self->winner == aggregate_op::npos) {
+                        for(std::size_t i = 0; i < self->awaitees.size(); ++i) {
+                            if(self->awaitees[i] == child) {
+                                self->winner = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if(self->is_deferring()) {
+                    return std::noop_coroutine();
+                }
+
+                self->phase = aggregate_op::Phase::Settled;
 
                 for(auto* other: self->awaitees) {
                     if(other && other != child) {
@@ -233,18 +292,7 @@ std::coroutine_handle<> async_node::handle_subtask_result(async_node* child) {
                     }
                 }
 
-                if(self->arming) {
-                    self->pending_resume = true;
-                    return std::noop_coroutine();
-                }
-
-                if(self->awaiter) {
-                    self->awaiter->clear_awaitee();
-                    self->awaiter->state = Cancelled;
-                    return self->awaiter->final_transition();
-                }
-
-                return std::noop_coroutine();
+                return self->deliver_deferred();
             }
 
             if(self->kind == NodeKind::WhenAny) {
@@ -257,40 +305,32 @@ std::coroutine_handle<> async_node::handle_subtask_result(async_node* child) {
                     }
                 }
 
-                self->done = true;
+                const bool deferring = self->is_deferring();
+                self->phase = aggregate_op::Phase::Settled;
                 for(auto* other: self->awaitees) {
                     if(other && other != child) {
                         other->cancel();
                     }
                 }
 
-                if(self->arming) {
-                    self->pending_resume = true;
+                self->defer_resume();
+                if(deferring) {
                     return std::noop_coroutine();
                 }
 
-                if(self->awaiter) {
-                    assert(self->awaiter->is_standard_task() && "aggregate awaiter must be a task");
-                    self->awaiter->clear_awaitee();
-                    return static_cast<standard_task*>(self->awaiter)->handle();
-                }
-
-                return std::noop_coroutine();
+                return self->deliver_deferred();
             }
 
             self->completed += 1;
             if(self->completed >= self->total) {
-                self->done = true;
-                if(self->arming) {
-                    self->pending_resume = true;
+                const bool deferring = self->is_deferring();
+                self->phase = aggregate_op::Phase::Settled;
+                self->defer_resume();
+                if(deferring) {
                     return std::noop_coroutine();
                 }
 
-                if(self->awaiter) {
-                    assert(self->awaiter->is_standard_task() && "aggregate awaiter must be a task");
-                    self->awaiter->clear_awaitee();
-                    return static_cast<standard_task*>(self->awaiter)->handle();
-                }
+                return self->deliver_deferred();
             }
 
             return std::noop_coroutine();

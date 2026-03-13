@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "test_transport.h"
+#include "../common/fd_helpers.h"
 #include "eventide/ipc/peer.h"
 #include "eventide/zest/zest.h"
 #include "eventide/common/compiler.h"
@@ -16,15 +18,6 @@
 #include "eventide/async/sync.h"
 #include "eventide/async/watcher.h"
 #include "eventide/serde/json/deserializer.h"
-
-#ifdef _WIN32
-#include <BaseTsd.h>
-#include <fcntl.h>
-#include <io.h>
-using ssize_t = SSIZE_T;
-#else
-#include <unistd.h>
-#endif
 
 namespace eventide::ipc {
 
@@ -85,137 +78,23 @@ struct RPCCancelNotification {
     CancelParams params;
 };
 
-class FakeTransport final : public Transport {
-public:
-    explicit FakeTransport(std::vector<std::string> incoming) :
-        incoming_messages(std::move(incoming)) {}
-
-    task<std::optional<std::string>> read_message() override {
-        if(read_index >= incoming_messages.size()) {
-            co_return std::nullopt;
-        }
-        co_return incoming_messages[read_index++];
-    }
-
-    task<Result<void>> write_message(std::string_view payload) override {
-        outgoing_messages.emplace_back(payload);
-        co_return Result<void>{};
-    }
-
-    const std::vector<std::string>& outgoing() const {
-        return outgoing_messages;
-    }
-
-private:
-    std::vector<std::string> incoming_messages;
-    std::vector<std::string> outgoing_messages;
-    std::size_t read_index = 0;
-};
-
-class ScriptedTransport final : public Transport {
-public:
-    using WriteHook = std::function<void(std::string_view, ScriptedTransport&)>;
-
-    ScriptedTransport(std::vector<std::string> incoming, WriteHook hook) :
-        incoming_messages(std::move(incoming)), write_hook(std::move(hook)) {
-        if(!incoming_messages.empty()) {
-            readable.set();
-        }
-    }
-
-    task<std::optional<std::string>> read_message() override {
-        while(read_index >= incoming_messages.size()) {
-            if(closed) {
-                co_return std::nullopt;
-            }
-
-            co_await readable.wait();
-            readable.reset();
-        }
-
-        co_return incoming_messages[read_index++];
-    }
-
-    task<Result<void>> write_message(std::string_view payload) override {
-        outgoing_messages.emplace_back(payload);
-        if(write_hook) {
-            write_hook(payload, *this);
-        }
-        co_return Result<void>{};
-    }
-
-    void push_incoming(std::string payload) {
-        incoming_messages.push_back(std::move(payload));
-        readable.set();
-    }
-
-    void close() {
-        closed = true;
-        readable.set();
-    }
-
-    const std::vector<std::string>& outgoing() const {
-        return outgoing_messages;
-    }
-
-private:
-    std::vector<std::string> incoming_messages;
-    std::vector<std::string> outgoing_messages;
-    std::size_t read_index = 0;
-    WriteHook write_hook;
-    event readable;
-    bool closed = false;
-};
-
 using RequestContext = JsonPeer::RequestContext;
 
 struct PendingAddResult {
-    Result<AddResult> value = std::unexpected("request not completed");
+    Result<AddResult> value = outcome_error(RPCError("request not completed"));
 };
 
+using test::create_pipe;
+using test::close_fd;
+using test::write_fd;
+
 namespace {
-
-#ifdef _WIN32
-int create_pipe_fds(int fds[2]) {
-    return _pipe(fds, 4096, _O_BINARY);
-}
-
-int close_fd(int fd) {
-    return _close(fd);
-}
-
-ssize_t write_fd(int fd, const char* data, size_t len) {
-    return _write(fd, data, static_cast<unsigned int>(len));
-}
-#else
-int create_pipe_fds(int fds[2]) {
-    return ::pipe(fds);
-}
-
-int close_fd(int fd) {
-    return ::close(fd);
-}
-
-ssize_t write_fd(int fd, const char* data, size_t len) {
-    return ::write(fd, data, len);
-}
-#endif
-
-std::string frame(std::string_view payload) {
-    std::string out;
-    out.reserve(payload.size() + 32);
-    out.append("Content-Length: ");
-    out.append(std::to_string(payload.size()));
-    out.append("\r\n\r\n");
-    out.append(payload);
-    return out;
-}
 
 task<> complete_request(JsonPeer& peer, PendingAddResult& out) {
     out.value =
         co_await peer.send_request<AddResult>("worker/build", CustomAddParams{.a = 2, .b = 3});
     if(!peer.close_output() && out.value.has_value()) {
-        out.value = std::unexpected("failed to close peer output");
+        out.value = outcome_error(RPCError("failed to close peer output"));
     }
     co_return;
 }
@@ -328,8 +207,8 @@ TEST_CASE(stream_note_response) {
 
     int incoming_fds[2] = {-1, -1};
     int outgoing_fds[2] = {-1, -1};
-    ASSERT_EQ(create_pipe_fds(incoming_fds), 0);
-    ASSERT_EQ(create_pipe_fds(outgoing_fds), 0);
+    ASSERT_EQ(create_pipe(incoming_fds), 0);
+    ASSERT_EQ(create_pipe(outgoing_fds), 0);
 
     auto input = pipe::open(incoming_fds[0], pipe::options{}, loop);
     ASSERT_TRUE(input.has_value());
@@ -494,27 +373,27 @@ TEST_CASE(request_notify_apis) {
         auto notify_from_context =
             context->send_notification("client/note/context", CustomNoteParams{.text = "context"});
         if(!notify_from_context) {
-            co_return std::unexpected(notify_from_context.error());
+            co_return outcome_error(notify_from_context.error());
         }
 
         auto notify_from_peer =
             peer.send_notification("client/note/peer", CustomNoteParams{.text = "peer"});
         if(!notify_from_peer) {
-            co_return std::unexpected(notify_from_peer.error());
+            co_return outcome_error(notify_from_peer.error());
         }
 
         auto context_result = co_await context->send_request<AddResult>(
             "client/add/context",
             CustomAddParams{.a = params.a, .b = params.b});
         if(!context_result) {
-            co_return std::unexpected(context_result.error());
+            co_return outcome_error(context_result.error());
         }
 
         auto peer_result =
             co_await peer.send_request<AddResult>("client/add/peer",
                                                   CustomAddParams{.a = params.b, .b = 1});
         if(!peer_result) {
-            co_return std::unexpected(peer_result.error());
+            co_return outcome_error(peer_result.error());
         }
 
         co_return AddResult{.sum = context_result->sum + peer_result->sum};
@@ -579,7 +458,7 @@ TEST_CASE(request_error_code) {
     JsonPeer peer(loop, std::move(transport));
 
     peer.on_request([&](RequestContext&, const AddParams&) -> RequestResult<AddParams> {
-        co_return std::unexpected(
+        co_return outcome_error(
             RPCError(protocol::ErrorCode::InvalidParams, "forced invalid params"));
     });
 
@@ -614,9 +493,9 @@ TEST_CASE(request_error_data) {
         protocol::Object data;
         data.insert_or_assign("detail", protocol::Value(std::string("invalid payload")));
         data.insert_or_assign("index", protocol::Value(std::int64_t{-3}));
-        co_return std::unexpected(RPCError(protocol::ErrorCode::InvalidParams,
-                                           "forced invalid params",
-                                           protocol::Value(std::move(data))));
+        co_return outcome_error(RPCError(protocol::ErrorCode::InvalidParams,
+                                         "forced invalid params",
+                                         protocol::Value(std::move(data))));
     });
 
     loop.schedule(peer.run());
@@ -669,7 +548,7 @@ TEST_CASE(outbound_error_data) {
 
     event_loop loop;
     JsonPeer peer(loop, std::move(transport));
-    Result<AddResult> request_result = std::unexpected("request did not complete");
+    Result<AddResult> request_result = outcome_error(RPCError("request did not complete"));
 
     auto requester = [&]() -> task<> {
         request_result =
@@ -723,7 +602,7 @@ TEST_CASE(bad_response_silent) {
 
     event_loop loop;
     JsonPeer peer(loop, std::move(transport));
-    Result<AddResult> request_result = std::unexpected("request did not complete");
+    Result<AddResult> request_result = outcome_error(RPCError("request did not complete"));
 
     auto requester = [&]() -> task<> {
         request_result =
@@ -979,7 +858,7 @@ TEST_CASE(context_token_propagates) {
                                                       CustomAddParams{.a = params.a, .b = params.b},
                                                       {.token = context.cancellation});
         if(!nested_result) {
-            co_return std::unexpected(nested_result.error());
+            co_return outcome_error(nested_result.error());
         }
 
         co_return AddResult{.sum = nested_result->sum};
@@ -1041,7 +920,7 @@ TEST_CASE(outbound_cancel_request) {
     event_loop loop;
     JsonPeer peer(loop, std::move(transport));
     cancellation_source source;
-    Result<AddResult> request_result = std::unexpected("request did not complete");
+    Result<AddResult> request_result = outcome_error(RPCError("request did not complete"));
 
     auto requester = [&]() -> task<> {
         request_result = co_await peer.send_request<AddResult>("worker/build",
@@ -1096,7 +975,7 @@ TEST_CASE(outbound_precancel) {
     JsonPeer peer(loop, std::move(transport));
     cancellation_source source;
     source.cancel();
-    Result<AddResult> request_result = std::unexpected("request did not complete");
+    Result<AddResult> request_result = outcome_error(RPCError("request did not complete"));
 
     auto requester = [&]() -> task<> {
         request_result = co_await peer.send_request<AddResult>("worker/build",
@@ -1140,7 +1019,7 @@ TEST_CASE(outbound_timeout_cancel) {
 
     event_loop loop;
     JsonPeer peer(loop, std::move(transport));
-    Result<AddResult> request_result = std::unexpected("request did not complete");
+    Result<AddResult> request_result = outcome_error(RPCError("request did not complete"));
 
     auto requester = [&]() -> task<> {
         request_result =
@@ -1182,7 +1061,7 @@ TEST_CASE(zero_timeout_cancel) {
 
     event_loop loop;
     JsonPeer peer(loop, std::move(transport));
-    Result<AddResult> request_result = std::unexpected("request did not complete");
+    Result<AddResult> request_result = outcome_error(RPCError("request did not complete"));
 
     auto requester = [&]() -> task<> {
         request_result =

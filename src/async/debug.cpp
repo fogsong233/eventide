@@ -27,6 +27,7 @@ static std::string_view state_name(async_node::State s) {
         case async_node::Running: return "Running";
         case async_node::Cancelled: return "Cancelled";
         case async_node::Finished: return "Finished";
+        case async_node::Failed: return "Failed";
     }
     return "Unknown";
 }
@@ -50,7 +51,7 @@ static std::string_view basename(const char* path) {
         return {};
     }
     std::string_view sv(path);
-    auto pos = sv.find_last_of("/\\");
+    auto pos = sv.find_last_of(R"(/\)");
     return pos != std::string_view::npos ? sv.substr(pos + 1) : sv;
 }
 
@@ -58,13 +59,18 @@ static void emit_node(const async_node* node, std::string& out) {
     auto file = basename(node->location.file_name());
     std::string label;
     if(!file.empty()) {
-        label = std::format("{}\\n{}\\n{}:{}",
+        label = std::format(R"({}
+{}
+{}:{})",
                             async_kind_name(node->kind),
                             state_name(node->state),
                             file,
                             node->location.line());
     } else {
-        label = std::format("{}\\n{}", async_kind_name(node->kind), state_name(node->state));
+        label = std::format(R"({}
+{})",
+                            async_kind_name(node->kind),
+                            state_name(node->state));
     }
 
     std::string_view shape = "box";
@@ -72,22 +78,24 @@ static void emit_node(const async_node* node, std::string& out) {
 
     if(node->is_standard_task()) {
         switch(node->state) {
-            case async_node::Running: color = "\"#90EE90\""; break;
-            case async_node::Finished: color = "\"#D3D3D3\""; break;
-            case async_node::Cancelled: color = "\"#FFB6C1\""; break;
+            case async_node::Running: color = R"("#90EE90")"; break;
+            case async_node::Finished: color = R"("#D3D3D3")"; break;
+            case async_node::Cancelled: color = R"("#FFB6C1")"; break;
+            case async_node::Failed: color = R"("#FFA07A")"; break;
             default: break;
         }
     } else if(node->is_aggregate_op()) {
         shape = "diamond";
-        color = "\"#D8BFD8\"";
+        color = R"("#D8BFD8")";
     } else if(node->kind == async_node::NodeKind::SystemIO) {
-        color = "\"#FFFFE0\"";
+        color = R"("#FFFFE0")";
     } else if(node->is_waiter_link()) {
-        color = "\"#FFDAB9\"";
+        color = R"("#FFDAB9")";
     }
 
     std::format_to(std::back_inserter(out),
-                   "  {} [label=\"{}\", shape={}, style=filled, fillcolor={}];\n",
+                   R"(  {} [label="{}", shape={}, style=filled, fillcolor={}];
+)",
                    node_id(node),
                    label,
                    shape,
@@ -98,7 +106,8 @@ static void emit_node(const sync_primitive* resource, std::string& out) {
     auto file = basename(resource->location.file_name());
     std::string label;
     if(!file.empty()) {
-        label = std::format("{}\\n{}:{}",
+        label = std::format(R"({}
+{}:{})",
                             sync_kind_name(resource->kind),
                             file,
                             resource->location.line());
@@ -107,14 +116,19 @@ static void emit_node(const sync_primitive* resource, std::string& out) {
     }
 
     std::format_to(std::back_inserter(out),
-                   "  {} [label=\"{}\", shape=ellipse, style=filled, fillcolor=\"{}\"];\n",
+                   R"(  {} [label="{}", shape=ellipse, style=filled, fillcolor="{}"];
+)",
                    node_id(resource),
                    label,
                    "#ADD8E6");
 }
 
 static void emit_edge(const void* from, const void* to, std::string& out) {
-    std::format_to(std::back_inserter(out), "  {} -> {};\n", node_id(from), node_id(to));
+    std::format_to(std::back_inserter(out),
+                   R"(  {} -> {};
+)",
+                   node_id(from),
+                   node_id(to));
 }
 
 const sync_primitive* async_node::get_resource_parent(const async_node* node) {
@@ -220,9 +234,12 @@ std::string async_node::dump_dot() const {
     }
 
     std::string out;
-    out += "digraph async_graph {\n";
-    out += "  rankdir=TB;\n";
-    out += "  node [fontname=\"Helvetica\", fontsize=10];\n";
+    out += R"(digraph async_graph {
+)";
+    out += R"(  rankdir=TB;
+)";
+    out += R"(  node [fontname="Helvetica", fontsize=10];
+)";
 
     std::set<const void*> visited;
     if(resource_root) {
@@ -231,7 +248,8 @@ std::string async_node::dump_dot() const {
         dump_dot_walk(async_root, visited, out);
     }
 
-    out += "}\n";
+    out += R"(}
+)";
     return out;
 }
 

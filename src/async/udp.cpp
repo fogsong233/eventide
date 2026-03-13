@@ -42,7 +42,7 @@ static result<unsigned int> to_uv_udp_init_flags(const udp::create_options& opti
     }
 #else
     if(options.ipv6_only) {
-        return std::unexpected(error::function_not_implemented);
+        return outcome_error(error::function_not_implemented);
     }
 #endif
 #ifdef UV_UDP_RECVMMSG
@@ -51,7 +51,7 @@ static result<unsigned int> to_uv_udp_init_flags(const udp::create_options& opti
     }
 #else
     if(options.recvmmsg) {
-        return std::unexpected(error::function_not_implemented);
+        return outcome_error(error::function_not_implemented);
     }
 #endif
     return out;
@@ -65,7 +65,7 @@ static result<unsigned int> to_uv_udp_bind_flags(const udp::bind_options& option
     }
 #else
     if(options.ipv6_only) {
-        return std::unexpected(error::function_not_implemented);
+        return outcome_error(error::function_not_implemented);
     }
 #endif
 #ifdef UV_UDP_REUSEADDR
@@ -74,7 +74,7 @@ static result<unsigned int> to_uv_udp_bind_flags(const udp::bind_options& option
     }
 #else
     if(options.reuse_addr) {
-        return std::unexpected(error::function_not_implemented);
+        return outcome_error(error::function_not_implemented);
     }
 #endif
 #ifdef UV_UDP_REUSEPORT
@@ -83,7 +83,7 @@ static result<unsigned int> to_uv_udp_bind_flags(const udp::bind_options& option
     }
 #else
     if(options.reuse_port) {
-        return std::unexpected(error::function_not_implemented);
+        return outcome_error(error::function_not_implemented);
     }
 #endif
     return out;
@@ -106,12 +106,12 @@ static udp::recv_flags to_udp_recv_flags(unsigned flags) {
 
 struct udp_recv_await : uv::await_op<udp_recv_await> {
     using await_base = uv::await_op<udp_recv_await>;
-    using promise_t = task<result<udp::recv_result>>::promise_type;
+    using promise_t = task<udp::recv_result, error>::promise_type;
 
     // UDP socket self used to register waiter and manage recv lifecycle.
     udp::Self* self;
     // Result slot written by on_read() and returned from await_resume().
-    result<udp::recv_result> outcome = std::unexpected(error());
+    result<udp::recv_result> outcome = outcome_error(error());
 
     explicit udp_recv_await(udp::Self* socket) : self(socket) {}
 
@@ -143,8 +143,7 @@ struct udp_recv_await : uv::await_op<udp_recv_await> {
         auto* u = static_cast<udp::Self*>(handle->data);
         assert(u != nullptr && "on_read requires udp state in handle->data");
 
-        auto err = uv::status_to_error(nread);
-        if(err) {
+        if(auto err = uv::status_to_error(nread)) {
             u->recv.mark_cancelled_if(nread);
             u->recv.deliver(err);
             return;
@@ -183,7 +182,7 @@ struct udp_recv_await : uv::await_op<udp_recv_await> {
             if(!err) {
                 self->receiving = true;
             } else {
-                outcome = std::unexpected(err);
+                outcome = outcome_error(err);
                 self->recv.disarm();
                 return waiting;
             }
@@ -270,9 +269,8 @@ struct udp_send_await : uv::await_op<udp_send_await> {
         const sockaddr* addr =
             dest.has_value() ? reinterpret_cast<const sockaddr*>(&dest.value()) : nullptr;
 
-        auto err =
-            uv::udp_send(req, self->handle, std::span<const uv_buf_t>{&buf, 1}, addr, on_send);
-        if(err) {
+        if(auto err =
+               uv::udp_send(req, self->handle, std::span<const uv_buf_t>{&buf, 1}, addr, on_send)) {
             result = err;
             self->send.disarm();
             return waiting;
@@ -308,7 +306,7 @@ udp::Self* udp::operator->() noexcept {
 
 static result<udp::endpoint> endpoint_from_sockaddr(const sockaddr* addr) {
     if(addr == nullptr) {
-        return std::unexpected(error::invalid_argument);
+        return outcome_error(error::invalid_argument);
     }
 
     udp::endpoint out{};
@@ -317,17 +315,17 @@ static result<udp::endpoint> endpoint_from_sockaddr(const sockaddr* addr) {
     if(addr->sa_family == AF_INET) {
         auto* in = reinterpret_cast<const sockaddr_in*>(addr);
         if(auto err = uv::ip4_name(*in, host, sizeof(host))) {
-            return std::unexpected(err);
+            return outcome_error(err);
         }
         port = ntohs(in->sin_port);
     } else if(addr->sa_family == AF_INET6) {
         auto* in6 = reinterpret_cast<const sockaddr_in6*>(addr);
         if(auto err = uv::ip6_name(*in6, host, sizeof(host))) {
-            return std::unexpected(err);
+            return outcome_error(err);
         }
         port = ntohs(in6->sin6_port);
     } else {
-        return std::unexpected(error::invalid_argument);
+        return outcome_error(error::invalid_argument);
     }
 
     out.addr = host;
@@ -338,7 +336,7 @@ static result<udp::endpoint> endpoint_from_sockaddr(const sockaddr* addr) {
 result<udp> udp::create(event_loop& loop) {
     auto self = make_udp_self();
     if(auto err = uv::udp_init(loop, self->handle)) {
-        return std::unexpected(err);
+        return outcome_error(err);
     }
 
     return udp(std::move(self));
@@ -348,11 +346,11 @@ result<udp> udp::create(create_options options, event_loop& loop) {
     auto self = make_udp_self();
     auto uv_flags = to_uv_udp_init_flags(options);
     if(!uv_flags) {
-        return std::unexpected(uv_flags.error());
+        return outcome_error(uv_flags.error());
     }
 
     if(auto err = uv::udp_init_ex(loop, self->handle, uv_flags.value())) {
-        return std::unexpected(err);
+        return outcome_error(err);
     }
 
     return udp(std::move(self));
@@ -361,11 +359,11 @@ result<udp> udp::create(create_options options, event_loop& loop) {
 result<udp> udp::open(int fd, event_loop& loop) {
     auto self = make_udp_self();
     if(auto err = uv::udp_init(loop, self->handle)) {
-        return std::unexpected(err);
+        return outcome_error(err);
     }
 
     if(auto err = uv::udp_open(self->handle, fd)) {
-        return std::unexpected(err);
+        return outcome_error(err);
     }
 
     return udp(std::move(self));
@@ -459,10 +457,10 @@ error udp::try_send(std::span<const char> data, std::string_view host, int port)
 
     uv_buf_t buf =
         uv::buf_init(const_cast<char*>(data.data()), static_cast<unsigned int>(data.size()));
-    auto sent = uv::udp_try_send(self->handle,
-                                 std::span<const uv_buf_t>{&buf, 1},
-                                 reinterpret_cast<const sockaddr*>(&resolved->storage));
-    if(!sent) {
+    if(auto sent = uv::udp_try_send(self->handle,
+                                    std::span<const uv_buf_t>{&buf, 1},
+                                    reinterpret_cast<const sockaddr*>(&resolved->storage));
+       !sent) {
         return sent.error();
     }
 
@@ -476,8 +474,8 @@ error udp::try_send(std::span<const char> data) {
 
     uv_buf_t buf =
         uv::buf_init(const_cast<char*>(data.data()), static_cast<unsigned int>(data.size()));
-    auto sent = uv::udp_try_send(self->handle, std::span<const uv_buf_t>{&buf, 1}, nullptr);
-    if(!sent) {
+    if(auto sent = uv::udp_try_send(self->handle, std::span<const uv_buf_t>{&buf, 1}, nullptr);
+       !sent) {
         return sent.error();
     }
 
@@ -494,9 +492,9 @@ error udp::stop_recv() {
     return {};
 }
 
-task<result<udp::recv_result>> udp::recv() {
+task<udp::recv_result, error> udp::recv() {
     if(!self) {
-        co_return std::unexpected(error::invalid_argument);
+        co_return outcome_error(error::invalid_argument);
     }
 
     if(self->recv.has_pending()) {
@@ -504,7 +502,7 @@ task<result<udp::recv_result>> udp::recv() {
     }
 
     if(self->recv.has_waiter()) {
-        co_return std::unexpected(error::connection_already_in_progress);
+        co_return outcome_error(error::connection_already_in_progress);
     }
 
     co_return co_await udp_recv_await{self.get()};
@@ -512,13 +510,13 @@ task<result<udp::recv_result>> udp::recv() {
 
 result<udp::endpoint> udp::getsockname() const {
     if(!self) {
-        return std::unexpected(error::invalid_argument);
+        return outcome_error(error::invalid_argument);
     }
 
     sockaddr_storage storage{};
     int len = sizeof(storage);
     if(auto err = uv::udp_getsockname(self->handle, *reinterpret_cast<sockaddr*>(&storage), len)) {
-        return std::unexpected(err);
+        return outcome_error(err);
     }
 
     return endpoint_from_sockaddr(reinterpret_cast<sockaddr*>(&storage));
@@ -526,13 +524,13 @@ result<udp::endpoint> udp::getsockname() const {
 
 result<udp::endpoint> udp::getpeername() const {
     if(!self) {
-        return std::unexpected(error::invalid_argument);
+        return outcome_error(error::invalid_argument);
     }
 
     sockaddr_storage storage{};
     int len = sizeof(storage);
     if(auto err = uv::udp_getpeername(self->handle, *reinterpret_cast<sockaddr*>(&storage), len)) {
-        return std::unexpected(err);
+        return outcome_error(err);
     }
 
     return endpoint_from_sockaddr(reinterpret_cast<sockaddr*>(&storage));

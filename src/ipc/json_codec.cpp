@@ -4,7 +4,6 @@
 #include <string_view>
 
 #include "eventide/serde/json/json.h"
-#include "eventide/serde/serde/raw_value.h"
 
 namespace eventide::ipc {
 
@@ -15,7 +14,7 @@ Result<T> parse_json_value(std::string_view json,
                            protocol::ErrorCode code = protocol::ErrorCode::RequestFailed) {
     auto parsed = serde::json::parse<T>(json);
     if(!parsed) {
-        return std::unexpected(
+        return outcome_error(
             RPCError(code, std::string(serde::json::error_message(parsed.error()))));
     }
     return std::move(*parsed);
@@ -27,15 +26,11 @@ Result<std::string>
                          protocol::ErrorCode code = protocol::ErrorCode::InternalError) {
     auto serialized = serde::json::to_string(value);
     if(!serialized) {
-        return std::unexpected(
+        return outcome_error(
             RPCError(code, std::string(serde::json::error_message(serialized.error()))));
     }
     return std::move(*serialized);
 }
-
-struct cancel_request_params {
-    protocol::RequestID id;
-};
 
 // --- Outgoing message structs (use RawValue to avoid double serialization) ---
 
@@ -144,6 +139,10 @@ Result<std::string> JsonCodec::encode_error_response(const protocol::RequestID& 
 }
 
 std::optional<protocol::RequestID> JsonCodec::parse_cancel_id(std::string_view params) {
+    struct cancel_request_params {
+        protocol::RequestID id;
+    };
+
     auto parsed =
         parse_json_value<cancel_request_params>(params, protocol::ErrorCode::InvalidParams);
     if(!parsed) {

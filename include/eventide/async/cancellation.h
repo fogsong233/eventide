@@ -1,244 +1,112 @@
 #pragma once
 
-#include <cstddef>
 #include <cstdlib>
-#include <expected>
 #include <memory>
-#include <tuple>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
+#include "sync.h"
 #include "task.h"
+#include "when.h"
 
 namespace eventide {
 
-class cancellation_token;
-
-namespace detail {
-
-template <typename T>
-using cancel_result_t = std::conditional_t<is_cancellation_t<T>, T, std::expected<T, cancellation>>;
-
-struct cancellation_watch_flag {
-    bool cancelled = false;
-};
-
-class cancellation_state : public std::enable_shared_from_this<cancellation_state> {
-public:
-    struct watcher_entry {
-        std::size_t id = 0;
-        async_node* node = nullptr;
-        std::weak_ptr<cancellation_watch_flag> flag;
-    };
-
-    bool cancelled() const noexcept {
-        return cancelled_state;
-    }
-
-    void cancel() noexcept {
-        if(cancelled_state) {
-            return;
-        }
-
-        auto keepalive = this->shared_from_this();
-        cancelled_state = true;
-        for(auto& watcher: watchers) {
-            if(watcher.id == 0) {
-                continue;
-            }
-
-            if(auto flag = watcher.flag.lock()) {
-                flag->cancelled = true;
-            }
-
-            if(watcher.node) {
-                watcher.node->cancel();
-            }
-        }
-
-        watchers.clear();
-    }
-
-    std::size_t subscribe(async_node* node,
-                          const std::shared_ptr<cancellation_watch_flag>& flag) noexcept {
-        if(flag) {
-            flag->cancelled = cancelled_state;
-        }
-
-        if(cancelled_state) {
-            if(node) {
-                node->cancel();
-            }
-            return 0;
-        }
-
-        auto id = next_id++;
-        if(next_id == 0) {
-            next_id = 1;
-        }
-
-        watchers.push_back(watcher_entry{
-            .id = id,
-            .node = node,
-            .flag = flag,
-        });
-        return id;
-    }
-
-    void unsubscribe(std::size_t id) noexcept {
-        if(id == 0 || watchers.empty()) {
-            return;
-        }
-
-        for(auto& watcher: watchers) {
-            if(watcher.id == id) {
-                watcher.id = 0;
-                watcher.node = nullptr;
-                watcher.flag.reset();
-                break;
-            }
-        }
-
-        if(!cancelled_state) {
-            compact();
-        }
-    }
-
-private:
-    void compact() noexcept {
-        std::erase_if(watchers, [](const watcher_entry& watcher) { return watcher.id == 0; });
-    }
-
-private:
-    std::vector<watcher_entry> watchers;
-    std::size_t next_id = 1;
-    bool cancelled_state = false;
-};
-
-}  // namespace detail
-
 class cancellation_token {
 public:
-    class registration {
+    class state {
     public:
-        registration() = default;
-
-        registration(const registration&) = delete;
-        registration& operator=(const registration&) = delete;
-
-        registration(registration&& other) noexcept :
-            state(std::move(other.state)), registration_id(other.registration_id),
-            watch_flag(std::move(other.watch_flag)) {
-            other.registration_id = 0;
+        bool is_cancelled() const noexcept {
+            return cancelled;
         }
 
-        registration& operator=(registration&& other) noexcept {
-            if(this == &other) {
-                return *this;
+        void cancel() noexcept {
+            if(cancelled) {
+                return;
+            }
+            cancelled = true;
+            // This event represents the sticky fact "cancellation has already
+            // happened", not the transient action "cancel whoever is currently
+            // waiting". That is why this uses set() instead of interrupt():
+            // future waiters must also observe the cancelled state
+            // immediately.
+            //
+            // Using interrupt() here introduces a lost-wakeup window between
+            // the pre-check in cancellation_token::wait() and the moment the
+            // event wait is actually linked.
+            event.set();
+        }
+
+        /// Returns a task that never succeeds.
+        ///
+        /// This awaitable turns the sticky cancellation state stored in
+        /// `cancel_event` back into task cancellation semantics.
+        ///
+        /// There are only two externally visible behaviors:
+        /// 1. If the token is already cancelled, this task cancels immediately.
+        /// 2. Otherwise it waits until the token's internal event is set, then
+        ///    cancels itself immediately.
+        ///
+        /// The event itself only wakes the waiter; it does not propagate
+        /// cancellation upward. The trailing `co_await cancel();` is therefore
+        /// essential: it converts "the cancellation event has fired" into the
+        /// coroutine state `Cancelled`, which is what with_token(...) and other
+        /// callers rely on.
+        task<> wait() {
+            if(cancelled) {
+                // Preserve cancellation semantics for already-fired tokens.
+                co_await eventide::cancel();
             }
 
-            unregister();
-            state = std::move(other.state);
-            registration_id = other.registration_id;
-            watch_flag = std::move(other.watch_flag);
-            other.registration_id = 0;
-            return *this;
-        }
+            // Wait for the sticky cancellation marker to become observable.
+            co_await event.wait();
 
-        ~registration() {
-            unregister();
-        }
-
-        void unregister() noexcept {
-            if(state && registration_id != 0) {
-                state->unsubscribe(registration_id);
-            }
-
-            registration_id = 0;
-            state.reset();
-        }
-
-        bool cancelled() const noexcept {
-            return watch_flag && watch_flag->cancelled;
+            // Being woken by cancel_event means "cancellation happened"; convert
+            // that wakeup into actual task cancellation.
+            co_await eventide::cancel();
         }
 
     private:
-        friend class cancellation_token;
-
-        registration(std::shared_ptr<detail::cancellation_state> state,
-                     std::size_t id,
-                     std::shared_ptr<detail::cancellation_watch_flag> flag) :
-            state(std::move(state)), registration_id(id), watch_flag(std::move(flag)) {}
-
-    private:
-        std::shared_ptr<detail::cancellation_state> state;
-        std::size_t registration_id = 0;
-        std::shared_ptr<detail::cancellation_watch_flag> watch_flag;
+        class event event;
+        bool cancelled = false;
     };
 
-    cancellation_token() = default;
+    cancellation_token() noexcept = delete;
+    cancellation_token(const cancellation_token&) noexcept = default;
+    cancellation_token& operator=(const cancellation_token&) noexcept = default;
 
     bool cancelled() const noexcept {
-        return state && state->cancelled();
+        return state->is_cancelled();
     }
 
-private:
-    template <typename U, std::same_as<cancellation_token>... Ts>
-        requires (sizeof...(Ts) > 0)
-    friend task<detail::cancel_result_t<U>> with_token(task<U>, Ts...);
-
-    registration register_task(async_node* node) const {
-        auto flag = std::make_shared<detail::cancellation_watch_flag>();
-        if(!state) {
-            return registration(nullptr, 0, std::move(flag));
-        }
-
-        auto id = state->subscribe(node, flag);
-        return registration(state, id, std::move(flag));
+    task<> wait() const noexcept {
+        return state->wait();
     }
 
 private:
     friend class cancellation_source;
 
-    explicit cancellation_token(std::shared_ptr<detail::cancellation_state> state) :
-        state(std::move(state)) {}
+    explicit cancellation_token(std::shared_ptr<state> state) : state(std::move(state)) {}
 
-private:
-    std::shared_ptr<detail::cancellation_state> state;
+    std::shared_ptr<state> state;
 };
 
 class cancellation_source {
 public:
-    cancellation_source() : state(std::make_shared<detail::cancellation_state>()) {}
+    cancellation_source() : state(std::make_shared<class cancellation_token::state>()) {}
 
     cancellation_source(const cancellation_source&) = delete;
     cancellation_source& operator=(const cancellation_source&) = delete;
-
-    cancellation_source(cancellation_source&&) noexcept = default;
-
-    cancellation_source& operator=(cancellation_source&& other) noexcept {
-        if(this == &other) {
-            return *this;
-        }
-
-        cancel();
-        state = std::move(other.state);
-        return *this;
-    }
 
     ~cancellation_source() {
         cancel();
     }
 
     void cancel() noexcept {
-        if(state) {
-            state->cancel();
-        }
+        state->cancel();
     }
 
     bool cancelled() const noexcept {
-        return state && state->cancelled();
+        return state->is_cancelled();
     }
 
     cancellation_token token() const noexcept {
@@ -246,39 +114,47 @@ public:
     }
 
 private:
-    std::shared_ptr<detail::cancellation_state> state;
+    std::shared_ptr<class cancellation_token::state> state;
 };
 
 /// with_token: cancel a task when any of the given tokens fire.
-template <typename T, std::same_as<cancellation_token>... Tokens>
+/// Races the inner task against token wait tasks using when_any;
+/// if any token fires, when_any propagates cancellation automatically.
+template <typename T, typename E, typename C, std::same_as<cancellation_token>... Tokens>
     requires (sizeof...(Tokens) > 0)
-task<detail::cancel_result_t<T>> with_token(task<T> task, Tokens... tokens) {
-    auto child = [&] {
-        if constexpr(is_cancellation_t<T>) {
-            return std::move(task);
-        } else {
-            return std::move(task).catch_cancel();
-        }
-    }();
-
+task<T, E, cancellation> with_token(task<T, E, C> inner_task, Tokens... tokens) {
     if((tokens.cancelled() || ...)) {
         co_await cancel();
-        std::abort();
     }
 
-    auto registrations = std::tuple{tokens.register_task(child.operator->())...};
-    auto result = co_await std::move(child);
-    std::apply([](auto&... regs) { (regs.unregister(), ...); }, registrations);
+    // Race the wrapped task against all token waits.
+    //
+    // The token side is pure cancellation: `tokens.wait()` never yields a value, it only
+    // suspends until cancellation interrupts the underlying event wait. Because that
+    // cancellation is not caught here, a token firing makes `when_any(...)` cancel
+    // immediately, and execution never reaches the code below.
+    //
+    // The inner task is wrapped with `catch_cancel()`, so its cancellation is converted into
+    // a normal value of type `outcome<T, E, cancellation>` instead of cancelling the race.
+    // That means reaching the next line implies the winner was the first branch.
+    auto variant_result = co_await when_any(std::move(inner_task).catch_cancel(), tokens.wait()...);
+    auto& task_result = std::get<0>(variant_result);
 
-    if(!result.has_value()) {
+    // Re-emit the inner task's cancellation as the cancellation of with_token(...).
+    if(task_result.is_cancelled()) {
         co_await cancel();
-        std::abort();
     }
 
-    if constexpr(std::is_void_v<decltype(*result)>) {
+    if constexpr(!std::is_void_v<E>) {
+        if(task_result.has_error()) {
+            co_return outcome_error(std::move(task_result).error());
+        }
+    }
+
+    if constexpr(std::is_void_v<T>) {
         co_return;
     } else {
-        co_return std::move(*result);
+        co_return std::move(*task_result);
     }
 }
 
