@@ -602,6 +602,56 @@ opt::OptTable make_match_opt_table() {
         .set_tablegen_mode(false);
 }
 
+enum AliasOptionID {
+    ALIAS_OPT_INVALID = 0,
+    ALIAS_OPT_INPUT = 1,
+    ALIAS_OPT_UNKNOWN = 2,
+    ALIAS_OPT_TRAP_EQ,
+    ALIAS_OPT_TRAP_DEFAULTS,
+    ALIAS_OPT_EMIT_EQ,
+    ALIAS_OPT_EMIT_LLVM,
+};
+
+constexpr auto kAliasOptInfos = std::array{
+    opt::OptTable::Info::input(ALIAS_OPT_INPUT),
+    opt::OptTable::Info::unknown(ALIAS_OPT_UNKNOWN),
+    opt::OptTable::Info::unaliased_one(opt::pfx_double,
+                                       "--trap=",
+                                       ALIAS_OPT_TRAP_EQ,
+                                       opt::Option::CommaJoinedClass,
+                                       1,
+                                       "",
+                                       ""),
+    opt::OptTable::Info::unaliased_one(opt::pfx_double,
+                                       "--trap-defaults",
+                                       ALIAS_OPT_TRAP_DEFAULTS,
+                                       opt::Option::FlagClass,
+                                       0,
+                                       "",
+                                       "")
+        .alias_of(ALIAS_OPT_TRAP_EQ, "all\0undefined\0"),
+    opt::OptTable::Info::unaliased_one(opt::pfx_double,
+                                       "--emit=",
+                                       ALIAS_OPT_EMIT_EQ,
+                                       opt::Option::JoinedClass,
+                                       1,
+                                       "",
+                                       ""),
+    opt::OptTable::Info::unaliased_one(opt::pfx_double,
+                                       "--emit-llvm",
+                                       ALIAS_OPT_EMIT_LLVM,
+                                       opt::Option::FlagClass,
+                                       0,
+                                       "",
+                                       "")
+        .alias_of(ALIAS_OPT_EMIT_EQ),
+};
+
+opt::OptTable make_alias_opt_table() {
+    return opt::OptTable(std::span<const opt::OptTable::Info>(kAliasOptInfos))
+        .set_tablegen_mode(false);
+}
+
 TEST_SUITE(option_extended_coverage) {
 
 TEST_CASE(ignore_case_controls_matching) {
@@ -803,6 +853,38 @@ TEST_CASE(option_matches_and_render_style) {
     EXPECT_EQ(table.option(MATCH_OPT_JOINED).render_style(), opt::Option::RenderJoinedStyle);
     EXPECT_EQ(table.option(MATCH_OPT_MEMBER).render_style(), opt::Option::RenderSeparateStyle);
     EXPECT_EQ(table.option(MATCH_OPT_OVERRIDE_FLAG).render_style(), opt::Option::RenderJoinedStyle);
+}
+
+TEST_CASE(flag_aliases_preserve_unaliased_addition_values) {
+    auto table = make_alias_opt_table();
+    auto parsed = parse_all(table, split2vec("--trap-defaults --emit-llvm"));
+
+    EXPECT_TRUE(parsed.errors.empty());
+    ASSERT_EQ(parsed.args.size(), 2U);
+
+    EXPECT_EQ(parsed.args[0].option_id.id(), ALIAS_OPT_TRAP_DEFAULTS);
+    EXPECT_EQ(parsed.args[0].unaliased_opt().id(), ALIAS_OPT_TRAP_EQ);
+    ASSERT_TRUE(parsed.args[0].unaliased_addition_values.has_value());
+    ASSERT_EQ(parsed.args[0].unaliased_addition_values->size(), 2U);
+    EXPECT_EQ((*parsed.args[0].unaliased_addition_values)[0], "all");
+    EXPECT_EQ((*parsed.args[0].unaliased_addition_values)[1], "undefined");
+    {
+        const auto trap_values = parsed.args[0].unaliased_values();
+        ASSERT_EQ(trap_values.size(), 2U);
+        EXPECT_EQ(trap_values[0], "all");
+        EXPECT_EQ(trap_values[1], "undefined");
+    }
+
+    EXPECT_EQ(parsed.args[1].option_id.id(), ALIAS_OPT_EMIT_LLVM);
+    EXPECT_EQ(parsed.args[1].unaliased_opt().id(), ALIAS_OPT_EMIT_EQ);
+    ASSERT_TRUE(parsed.args[1].unaliased_addition_values.has_value());
+    ASSERT_EQ(parsed.args[1].unaliased_addition_values->size(), 1U);
+    EXPECT_EQ((*parsed.args[1].unaliased_addition_values)[0], "");
+    {
+        const auto emit_values = parsed.args[1].unaliased_values();
+        ASSERT_EQ(emit_values.size(), 1U);
+        EXPECT_EQ(emit_values[0], "");
+    }
 }
 
 };  // TEST_SUITE(option_extended_coverage)
