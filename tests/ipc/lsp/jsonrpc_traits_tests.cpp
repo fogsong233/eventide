@@ -7,14 +7,14 @@
 #include <utility>
 #include <vector>
 
-#include "../ipc/test_transport.h"
+#include "../test_transport.h"
 #include "eventide/ipc/peer.h"
 #include "eventide/zest/zest.h"
 #include "eventide/async/async.h"
 #include "eventide/serde/json/deserializer.h"
-#include "eventide/language/protocol.h"
+#include "eventide/ipc/lsp/protocol.h"
 
-namespace eventide::language {
+namespace eventide::ipc::lsp {
 
 namespace ipc = eventide::ipc;
 
@@ -62,20 +62,20 @@ struct Notification {
     NoteParams params;
 };
 
-}  // namespace eventide::language
+}  // namespace eventide::ipc::lsp
 
 template <>
-struct eventide::ipc::protocol::RequestTraits<eventide::language::AddParams> {
-    using Result = eventide::language::AddResult;
+struct eventide::ipc::protocol::RequestTraits<eventide::ipc::lsp::AddParams> {
+    using Result = eventide::ipc::lsp::AddResult;
     constexpr inline static std::string_view method = "test/add";
 };
 
 template <>
-struct eventide::ipc::protocol::NotificationTraits<eventide::language::NoteParams> {
+struct eventide::ipc::protocol::NotificationTraits<eventide::ipc::lsp::NoteParams> {
     constexpr inline static std::string_view method = "test/note";
 };
 
-namespace eventide::language {
+namespace eventide::ipc::lsp {
 
 TEST_SUITE(language_jsonrpc_traits) {
 
@@ -124,7 +124,7 @@ TEST_CASE(traits_dispatch_order) {
     auto response = serde::json::from_json<Response>(transport_ptr->outgoing().front());
     ASSERT_TRUE(response.has_value());
     EXPECT_EQ(response->jsonrpc, "2.0");
-    EXPECT_EQ(response->id.value, 1);
+    EXPECT_EQ(std::get<std::int64_t>(response->id), 1);
     ASSERT_TRUE(response->result.has_value());
     EXPECT_EQ(response->result->sum, 5);
 }
@@ -161,7 +161,7 @@ TEST_CASE(explicit_method) {
     ASSERT_EQ(transport_ptr->outgoing().size(), 1U);
     auto response = serde::json::from_json<Response>(transport_ptr->outgoing().front());
     ASSERT_TRUE(response.has_value());
-    EXPECT_EQ(response->id.value, 2);
+    EXPECT_EQ(std::get<std::int64_t>(response->id), 2);
     ASSERT_TRUE(response->result.has_value());
     EXPECT_EQ(response->result->sum, 15);
 }
@@ -197,7 +197,7 @@ TEST_CASE(request_notify_apis) {
     peer.on_request([&](ipc::JsonPeer::RequestContext& context,
                         const AddParams& params) -> ipc::RequestResult<AddParams> {
         request_method = std::string(context.method);
-        request_id = static_cast<protocol::integer>(context.id.value);
+        request_id = static_cast<protocol::integer>(std::get<std::int64_t>(context.id));
 
         auto notify_from_context =
             context->send_notification("client/note/context", CustomNoteParams{.text = "context"});
@@ -252,7 +252,7 @@ TEST_CASE(request_notify_apis) {
     auto request_from_context = serde::json::from_json<Request>(outgoing[2]);
     ASSERT_TRUE(request_from_context.has_value());
     EXPECT_EQ(request_from_context->jsonrpc, "2.0");
-    EXPECT_EQ(request_from_context->id.value, 1);
+    EXPECT_EQ(std::get<std::int64_t>(request_from_context->id), 1);
     EXPECT_EQ(request_from_context->method, "client/add/context");
     EXPECT_EQ(request_from_context->params.a, 2);
     EXPECT_EQ(request_from_context->params.b, 3);
@@ -260,7 +260,7 @@ TEST_CASE(request_notify_apis) {
     auto request_from_server = serde::json::from_json<Request>(outgoing[3]);
     ASSERT_TRUE(request_from_server.has_value());
     EXPECT_EQ(request_from_server->jsonrpc, "2.0");
-    EXPECT_EQ(request_from_server->id.value, 2);
+    EXPECT_EQ(std::get<std::int64_t>(request_from_server->id), 2);
     EXPECT_EQ(request_from_server->method, "client/add/server");
     EXPECT_EQ(request_from_server->params.a, 3);
     EXPECT_EQ(request_from_server->params.b, 1);
@@ -268,11 +268,11 @@ TEST_CASE(request_notify_apis) {
     auto final_response = serde::json::from_json<Response>(outgoing[4]);
     ASSERT_TRUE(final_response.has_value());
     EXPECT_EQ(final_response->jsonrpc, "2.0");
-    EXPECT_EQ(final_response->id.value, 7);
+    EXPECT_EQ(std::get<std::int64_t>(final_response->id), 7);
     ASSERT_TRUE(final_response->result.has_value());
     EXPECT_EQ(final_response->result->sum, 13);
 }
 
 };  // TEST_SUITE(language_jsonrpc_traits)
 
-}  // namespace eventide::language
+}  // namespace eventide::ipc::lsp
