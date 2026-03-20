@@ -43,7 +43,7 @@ using runtime_callable_t =
 
 template <typename T>
 struct ParsedResult {
-    unsigned next_index;
+    unsigned next_index = 0;
     T options;
     std::set<const decl::Category*> matched_categories;
 };
