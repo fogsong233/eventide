@@ -3,8 +3,7 @@
 #include <utility>
 #include <vector>
 
-#include "eventide/deco/macro.h"
-#include "eventide/deco/runtime.h"
+#include "eventide/deco/deco.h"
 #include <eventide/zest/zest.h>
 
 namespace {

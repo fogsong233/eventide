@@ -1,11 +1,15 @@
-add_library(eventide_deco INTERFACE)
+add_library(eventide_deco STATIC)
 add_library(eventide::deco ALIAS eventide_deco)
 
-target_include_directories(eventide_deco INTERFACE
+target_sources(eventide_deco PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime.cc"
+)
+
+target_include_directories(eventide_deco PUBLIC
     "${PROJECT_SOURCE_DIR}/include"
 )
 
-target_link_libraries(eventide_deco INTERFACE
+target_link_libraries(eventide_deco PUBLIC
     eventide::option
     eventide::reflection
 )

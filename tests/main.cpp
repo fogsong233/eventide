@@ -3,12 +3,9 @@
 #include <string>
 #include <string_view>
 
-#include "eventide/deco/decl.h"
-#include "eventide/deco/macro.h"
-#include "eventide/deco/runtime.h"
+#include "eventide/deco/deco.h"
 #include "eventide/zest/runner.h"
 #include "eventide/zest/zest.h"
-#include "eventide/async/async.h"
 
 struct UnitestOpt {
     DecoKVStyled(style = deco::decl::KVStyle::Joined | deco::decl::KVStyle::Separate,

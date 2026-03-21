@@ -1,8 +1,11 @@
 #pragma once
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <charconv>
 #include <concepts>
 #include <cstdlib>
+#include <format>
 #include <optional>
 #include <span>
 #include <string>
@@ -85,6 +88,199 @@ struct CategoryRef {
     }
 };
 
+struct ParseControl {
+    enum class Action : char {
+        Continue = 0,
+        Stop = 1,
+        Restart = 2,
+    };
+
+    Action action = Action::Continue;
+    std::span<std::string> next_argv{};
+
+    constexpr ParseControl() = default;
+
+    constexpr ParseControl(Action action, std::span<std::string> next_argv = {}) :
+        action(action), next_argv(next_argv) {}
+
+    constexpr static auto next() -> ParseControl {
+        return {};
+    }
+
+    constexpr static auto stop() -> ParseControl {
+        return ParseControl(Action::Stop);
+    }
+
+    constexpr static auto restart(std::span<std::string> next_argv) -> ParseControl {
+        return ParseControl(Action::Restart, next_argv);
+    }
+};
+
+template <typename ResTy>
+struct ParseStep {
+    const backend::ParsedArgumentOwning* parsed_arg = nullptr;
+    unsigned next_cursor_index = 0;
+    std::span<std::string> argv_span{};
+    const ResTy* parsed_value = nullptr;
+
+    constexpr ParseStep() = default;
+
+    constexpr ParseStep(const backend::ParsedArgumentOwning& arg,
+                        unsigned next_cursor,
+                        std::span<std::string> argv,
+                        const ResTy& value) :
+        parsed_arg(&arg), next_cursor_index(next_cursor), argv_span(argv), parsed_value(&value) {}
+
+    constexpr auto arg() const -> const backend::ParsedArgumentOwning& {
+        return *parsed_arg;
+    }
+
+    constexpr auto next_cursor() const -> unsigned {
+        return next_cursor_index;
+    }
+
+    constexpr auto argv() const -> std::span<std::string> {
+        return argv_span;
+    }
+
+    constexpr auto value() const -> const ResTy& {
+        return *parsed_value;
+    }
+
+    constexpr auto next() const -> ParseControl {
+        return ParseControl::next();
+    }
+
+    constexpr auto stop() const -> ParseControl {
+        return ParseControl::stop();
+    }
+
+    constexpr auto restart(std::span<std::string> next_argv) const -> ParseControl {
+        return ParseControl::restart(next_argv);
+    }
+};
+
+struct IntoContext {
+    std::span<const std::string> argv_span{};
+    unsigned highlight_begin_index = 0;
+    unsigned highlight_end_index = 0;
+
+    constexpr IntoContext() = default;
+
+    constexpr IntoContext(std::span<const std::string> argv,
+                          unsigned highlight_begin,
+                          unsigned highlight_end) :
+        argv_span(argv), highlight_begin_index(highlight_begin),
+        highlight_end_index(highlight_end) {}
+
+    constexpr auto argv() const -> std::span<const std::string> {
+        return argv_span;
+    }
+
+    constexpr auto highlight_begin() const -> unsigned {
+        return highlight_begin_index;
+    }
+
+    constexpr auto highlight_end() const -> unsigned {
+        return highlight_end_index;
+    }
+
+    static auto at_cursor(std::span<const std::string> argv, unsigned index) -> IntoContext {
+        const unsigned clamped = std::min<unsigned>(index, argv.size());
+        return IntoContext(argv, clamped, clamped);
+    }
+
+    template <typename ArgTy>
+    static auto from_argument(std::span<const std::string> argv, const ArgTy& arg) -> IntoContext {
+        const unsigned begin = std::min<unsigned>(arg.index, argv.size());
+        if(begin >= argv.size()) {
+            return at_cursor(argv, begin);
+        }
+
+        unsigned end = begin + 1;
+        unsigned cursor = begin + 1;
+        for(const auto& value: arg.values) {
+            if(cursor >= argv.size() || argv[cursor] != value) {
+                break;
+            }
+            ++cursor;
+            end = cursor;
+        }
+        return IntoContext(argv, begin, end);
+    }
+
+    template <typename ArgTy>
+    static auto from_value(std::span<const std::string> argv,
+                           const ArgTy& arg,
+                           std::string_view value) -> IntoContext {
+        const unsigned begin = std::min<unsigned>(arg.index, argv.size());
+        if(begin >= argv.size()) {
+            return at_cursor(argv, begin);
+        }
+
+        if(argv[begin] == value) {
+            return IntoContext(argv, begin, begin + 1);
+        }
+
+        unsigned cursor = begin + 1;
+        for(const auto& item: arg.values) {
+            if(cursor >= argv.size() || argv[cursor] != item) {
+                break;
+            }
+            if(item == value) {
+                return IntoContext(argv, cursor, cursor + 1);
+            }
+            ++cursor;
+        }
+        return from_argument(argv, arg);
+    }
+
+    auto format_error(std::string_view reason) const -> std::string {
+        if(argv_span.empty()) {
+            return std::string(reason);
+        }
+
+        std::string rendered;
+        rendered.reserve(argv_span.size() * 8);
+        std::vector<std::size_t> starts;
+        starts.reserve(argv_span.size());
+
+        std::size_t cursor = 0;
+        for(std::size_t i = 0; i < argv_span.size(); ++i) {
+            starts.push_back(cursor);
+            rendered += argv_span[i];
+            cursor += argv_span[i].size();
+            if(i + 1 < argv_span.size()) {
+                rendered.push_back(' ');
+                ++cursor;
+            }
+        }
+
+        const unsigned begin = std::min<unsigned>(highlight_begin_index, argv_span.size());
+        unsigned end = std::min<unsigned>(highlight_end_index, argv_span.size());
+        std::size_t marker_start = rendered.size();
+        std::size_t marker_width = 1;
+        std::string label = "at end of argv";
+
+        if(begin < argv_span.size()) {
+            if(end <= begin) {
+                end = begin + 1;
+            }
+            marker_start = starts[begin];
+            marker_width = starts[end - 1] + argv_span[end - 1].size() - marker_start;
+            label = std::format("at argv[{}]", begin);
+        }
+
+        std::string marker(marker_start, ' ');
+        marker.push_back('^');
+        if(marker_width > 1) {
+            marker.append(marker_width - 1, '~');
+        }
+
+        return std::format("{}:\n  {}\n  {}\n  {}", label, rendered, marker, reason);
+    }
+};
+
 struct DecoFields {
     // if true, it's required if its category occurs in options.
     bool required = true;
@@ -99,6 +295,26 @@ struct CommonOptionFields : DecoFields {
     std::string_view meta_var = "<value>";
 
     constexpr CommonOptionFields() = default;
+};
+
+template <typename ResTy>
+struct OptionCallbackField {
+    using Step = ParseStep<ResTy>;
+    using ParseCallback = ParseControl (*)(const Step& step);
+
+    struct Action {
+        static auto next(const Step&) -> ParseControl {
+            return ParseControl::next();
+        }
+
+        static auto stop(const Step&) -> ParseControl {
+            return ParseControl::stop();
+        }
+    };
+
+    ParseCallback after_parsed = nullptr;
+
+    constexpr OptionCallbackField() = default;
 };
 
 template <typename Ty>
@@ -189,6 +405,39 @@ struct DecoOptionBase {
     constexpr virtual ~DecoOptionBase() = default;
     // return error message if parsing fails, otherwise return std::nullopt
     virtual std::optional<std::string> into(backend::ParsedArgument&& arg) = 0;
+
+    virtual std::optional<std::string> into(backend::ParsedArgument&& arg,
+                                            const IntoContext& context) {
+        (void)context;
+        return into(std::move(arg));
+    }
+};
+
+struct ErasedParseCallback {
+    constexpr static std::size_t storage_size = sizeof(void (*)());
+    using storage_t = std::array<char, storage_size>;
+    using invoker_t = ParseControl (*)(const storage_t& storage,
+                                       const backend::ParsedArgumentOwning& arg,
+                                       unsigned next_cursor,
+                                       std::span<std::string> argv,
+                                       const DecoOptionBase& option);
+
+    storage_t storage{};
+    invoker_t invoke = nullptr;
+
+    constexpr explicit operator bool() const {
+        return invoke != nullptr;
+    }
+
+    constexpr auto operator()(const backend::ParsedArgumentOwning& arg,
+                              unsigned next_cursor,
+                              std::span<std::string> argv,
+                              const DecoOptionBase& option) const -> ParseControl {
+        if(invoke == nullptr) {
+            return ParseControl::next();
+        }
+        return invoke(storage, arg, next_cursor, argv, option);
+    }
 };
 
 template <typename ResTy>
@@ -257,12 +506,21 @@ inline bool iequals_ascii(std::string_view lhs, std::string_view rhs) {
     return true;
 }
 
+inline bool is_contextualized_error(std::string_view err) {
+    return err.starts_with("at argv[") || err.starts_with("at end of argv:");
+}
+
 template <typename ErrorTy>
-std::optional<std::string> normalize_into_error(const std::optional<ErrorTy>& err) {
+std::optional<std::string> normalize_into_error(const std::optional<ErrorTy>& err,
+                                                const IntoContext& context = {}) {
     if(!err.has_value()) {
         return std::nullopt;
     }
-    return std::string(std::string_view(*err));
+    std::string message{std::string_view(*err)};
+    if(is_contextualized_error(message)) {
+        return message;
+    }
+    return context.format_error(message);
 }
 
 template <typename ResTy>
@@ -319,15 +577,21 @@ std::optional<std::string> parse_primitive_scalar(ResTy& out, std::string_view t
 }
 
 template <typename ResTy>
-std::optional<std::string> assign_scalar(std::optional<ResTy>& target, std::string_view text) {
-    if constexpr(trait::CustomStringResultTy<ResTy>) {
+std::optional<std::string> assign_scalar(std::optional<ResTy>& target,
+                                         std::string_view text,
+                                         const IntoContext& context = {}) {
+    if constexpr(trait::CustomStringResultTyWithContext<ResTy>) {
+        auto& res = target.emplace();
+        const auto err = res.into(text, context);
+        return normalize_into_error(err, context);
+    } else if constexpr(trait::CustomStringResultTy<ResTy>) {
         auto& res = target.emplace();
         const auto err = res.into(text);
-        return normalize_into_error(err);
+        return normalize_into_error(err, context);
     } else {
         ResTy parsed{};
         if(auto err = parse_primitive_scalar(parsed, text)) {
-            return err;
+            return context.format_error(*err);
         }
         target = std::move(parsed);
         return std::nullopt;
@@ -336,12 +600,18 @@ std::optional<std::string> assign_scalar(std::optional<ResTy>& target, std::stri
 
 template <typename ResTy>
 std::optional<std::string> assign_vector(std::optional<ResTy>& target,
-                                         std::span<const std::string_view> values) {
-    if constexpr(trait::CustomStringVectorResultTy<ResTy>) {
+                                         std::span<const std::string_view> values,
+                                         const IntoContext& context = {}) {
+    if constexpr(trait::CustomStringVectorResultTyWithContext<ResTy>) {
+        auto& res = target.emplace();
+        std::vector<std::string_view> custom_values(values.begin(), values.end());
+        const auto err = res.into(custom_values, context);
+        return normalize_into_error(err, context);
+    } else if constexpr(trait::CustomStringVectorResultTy<ResTy>) {
         auto& res = target.emplace();
         std::vector<std::string_view> custom_values(values.begin(), values.end());
         const auto err = res.into(custom_values);
-        return normalize_into_error(err);
+        return normalize_into_error(err, context);
     } else {
         using item_type = typename ResTy::value_type;
         ResTy parsed;
@@ -349,7 +619,8 @@ std::optional<std::string> assign_vector(std::optional<ResTy>& target,
         for(std::size_t i = 0; i < values.size(); ++i) {
             item_type item{};
             if(auto err = parse_primitive_scalar(item, values[i])) {
-                return "invalid vector value at index " + std::to_string(i) + ": " + *err;
+                return context.format_error("invalid vector value at index " + std::to_string(i) +
+                                            ": " + *err);
             }
             parsed.emplace_back(std::move(item));
         }
@@ -361,7 +632,8 @@ std::optional<std::string> assign_vector(std::optional<ResTy>& target,
 template <typename ResTy>
 std::optional<std::string> assign_input_vector(std::optional<ResTy>& target,
                                                std::vector<std::string>& raw_inputs,
-                                               std::span<const std::string_view> values) {
+                                               std::span<const std::string_view> values,
+                                               const IntoContext& context = {}) {
     const auto original_size = raw_inputs.size();
     raw_inputs.reserve(original_size + values.size());
     for(const auto value: values) {
@@ -374,7 +646,7 @@ std::optional<std::string> assign_input_vector(std::optional<ResTy>& target,
         all_values.emplace_back(value);
     }
 
-    if(auto err = assign_vector(target, all_values)) {
+    if(auto err = assign_vector(target, all_values, context)) {
         raw_inputs.resize(original_size);
         return err;
     }
@@ -390,8 +662,13 @@ struct FlagOption : DecoOption<ResTy> {
     constexpr ~FlagOption() = default;
 
     std::optional<std::string> into(backend::ParsedArgument&& arg) override {
+        return into(std::move(arg), {});
+    }
+
+    std::optional<std::string> into(backend::ParsedArgument&& arg,
+                                    const IntoContext& context) override {
         if(!arg.values.empty()) {
-            return "flag option does not accept values";
+            return context.format_error("flag option does not accept values");
         }
         if constexpr(std::same_as<ResTy, bool>) {
             this->as_optional() = true;
@@ -409,10 +686,16 @@ struct ScalarOption : DecoOption<ResTy> {
     constexpr ~ScalarOption() = default;
 
     std::optional<std::string> into(backend::ParsedArgument&& arg) override {
+        return into(std::move(arg), {});
+    }
+
+    std::optional<std::string> into(backend::ParsedArgument&& arg,
+                                    const IntoContext& context) override {
         if(arg.values.size() != 1) {
-            return "expected exactly one value";
+            return context.format_error("expected exactly one value");
         }
-        return detail::assign_scalar(this->as_optional(), arg.values.front());
+        const auto value_context = IntoContext::from_value(context.argv(), arg, arg.values.front());
+        return detail::assign_scalar(this->as_optional(), arg.values.front(), value_context);
     }
 };
 
@@ -424,22 +707,37 @@ struct InputOption : DecoOption<ResTy> {
     constexpr ~InputOption() = default;
 
     std::optional<std::string> into(backend::ParsedArgument&& arg) override {
+        return into(std::move(arg), {});
+    }
+
+    std::optional<std::string> into(backend::ParsedArgument&& arg,
+                                    const IntoContext& context) override {
         if constexpr(trait::ScalarResultType<ResTy>) {
             if(arg.values.empty()) {
-                return detail::assign_scalar(this->as_optional(), arg.get_spelling_view());
+                const auto value_context =
+                    IntoContext::from_value(context.argv(), arg, arg.get_spelling_view());
+                return detail::assign_scalar(this->as_optional(),
+                                             arg.get_spelling_view(),
+                                             value_context);
             }
             if(arg.values.size() == 1) {
-                return detail::assign_scalar(this->as_optional(), arg.values.front());
+                const auto value_context =
+                    IntoContext::from_value(context.argv(), arg, arg.values.front());
+                return detail::assign_scalar(this->as_optional(), arg.values.front(), value_context);
             }
-            return "input option expects at most one value";
+            return context.format_error("input option expects at most one value");
         } else {
             if(arg.values.empty()) {
                 const std::string_view spelling = arg.get_spelling_view();
                 return detail::assign_input_vector(this->as_optional(),
                                                    this->raw_inputs,
-                                                   {&spelling, 1});
+                                                   {&spelling, 1},
+                                                   context);
             }
-            return detail::assign_input_vector(this->as_optional(), this->raw_inputs, arg.values);
+            return detail::assign_input_vector(this->as_optional(),
+                                               this->raw_inputs,
+                                               arg.values,
+                                               context);
         }
     }
 };
@@ -451,7 +749,12 @@ struct VectorOption : DecoOption<ResTy> {
     constexpr ~VectorOption() = default;
 
     std::optional<std::string> into(backend::ParsedArgument&& arg) override {
-        return detail::assign_vector(this->as_optional(), arg.values);
+        return into(std::move(arg), {});
+    }
+
+    std::optional<std::string> into(backend::ParsedArgument&& arg,
+                                    const IntoContext& context) override {
+        return detail::assign_vector(this->as_optional(), arg.values, context);
     }
 };
 

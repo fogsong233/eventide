@@ -1,10 +1,7 @@
-#include "eventide/deco/decl.h"
-
 #include <string>
 #include <vector>
 
-#include "eventide/deco/macro.h"
-#include "eventide/deco/trait.h"
+#include "eventide/deco/deco.h"
 #include <eventide/zest/zest.h>
 
 static_assert(deco::trait::ScalarResultType<bool>);
