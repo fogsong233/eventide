@@ -7,9 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "eventide/deco/decl.h"
-#include "eventide/deco/macro.h"
-#include "eventide/deco/runtime.h"
+#include "eventide/deco/deco.h"
+#include "eventide/deco/detail/text.h"
 #include "eventide/zest/detail/registry.h"
 #include "eventide/zest/run.h"
 

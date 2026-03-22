@@ -69,7 +69,7 @@ struct CompatibleRendererImpl {
         const auto help_text =
             entry.help.empty() ? style.usage.default_help : std::string_view(entry.help);
         if(entry.usage.size() >= style.usage.help_column) {
-            std::string rendered = std::format("  {}\n    ", entry.usage);
+            std::string rendered = std::format("  {}\n  ", entry.usage);
             rendered.append(style.usage.help_column, ' ');
             rendered += help_text;
             return rendered;
@@ -225,7 +225,7 @@ struct ModernRendererImpl {
             entry.help.empty() ? std::string(style.usage.default_help) : entry.help;
         const auto help = paint(ansi_help, help_text);
         if(entry.usage.size() >= style.usage.help_column) {
-            return "  " + syntax + "\n    " + help;
+            return "  " + syntax + "\n" + std::string(style.usage.help_column, ' ') + "  " + help;
         }
         return "  " + syntax + std::string(style.usage.help_column - entry.usage.size(), ' ') +
                help;
@@ -522,9 +522,7 @@ auto mutable_default_renderer() -> Renderer& {
 }  // namespace
 
 auto looks_like_rendered_diagnostic(std::string_view text) -> bool {
-    return text.starts_with("at argv[") || text.starts_with("at end of argv:") ||
-           (text.starts_with("\033[") && (text.find("╰─▶") != std::string_view::npos ||
-                                          text.find("error") != std::string_view::npos));
+    return false;
 }
 
 auto diagnostic_at(std::span<const std::string> argv,

@@ -187,6 +187,33 @@ struct CallbackRestartOpt {
     verbose;
 };
 
+struct CallbackRestartOwnedState {
+    inline static unsigned arg_index = 0;
+    inline static unsigned next_cursor = 0;
+    inline static std::string value;
+
+    static void reset() {
+        arg_index = 0;
+        next_cursor = 0;
+        value.clear();
+    }
+};
+
+struct CallbackRestartOwnedOpt {
+    DecoInput(required = false; after_parsed = [](const Step& step) {
+        CallbackRestartOwnedState::arg_index = step.arg().index;
+        CallbackRestartOwnedState::next_cursor = step.next_cursor();
+        CallbackRestartOwnedState::value = step.value();
+        std::vector<std::string> rewritten;
+        rewritten.emplace_back("-v");
+        return step.restart(rewritten);
+    };)
+    <std::string> script;
+
+    DecoFlag(names = {"-v"}; required = false)
+    verbose;
+};
+
 struct CallbackShortcutOpt {
     DecoInput(required = false; after_parsed = Action::stop;)
     <std::string> script;
@@ -587,6 +614,26 @@ TEST_CASE(option_callback_can_restart_with_new_span) {
     EXPECT_EQ(CallbackRestartState::arg_index, 0u);
     EXPECT_EQ(CallbackRestartState::next_cursor, 1u);
     EXPECT_TRUE(CallbackRestartState::value == "entry.cc");
+}
+
+TEST_CASE(option_callback_can_restart_with_owned_argv) {
+    CallbackRestartOwnedState::reset();
+
+    auto res = deco::cli::parse<CallbackRestartOwnedOpt>(into_deco_args("entry.cc"));
+    EXPECT_TRUE(res.has_value());
+    if(!res.has_value()) {
+        return;
+    }
+
+    EXPECT_TRUE(res->options.script.has_value());
+    EXPECT_TRUE(*res->options.script == "entry.cc");
+    EXPECT_TRUE(res->options.verbose.has_value() && *res->options.verbose);
+    EXPECT_EQ(res->argv().size(), 1u);
+    EXPECT_TRUE(res->argv()[0] == "-v");
+    EXPECT_EQ(res->next_index, 1);
+    EXPECT_EQ(CallbackRestartOwnedState::arg_index, 0u);
+    EXPECT_EQ(CallbackRestartOwnedState::next_cursor, 1u);
+    EXPECT_TRUE(CallbackRestartOwnedState::value == "entry.cc");
 }
 
 TEST_CASE(option_callback_supports_action_shortcut) {

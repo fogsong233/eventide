@@ -6,6 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <print>
@@ -46,6 +47,7 @@ struct Invocation {
     std::set<const decl::Category*> matched_categories;
     std::span<std::string> original_argv{};
     std::span<std::string> active_argv{};
+    std::shared_ptr<std::vector<std::string>> owned_active_argv{};
     std::vector<backend::ParsedArgumentOwning> parsed_arguments{};
     std::vector<std::string> command_path{};
 
@@ -364,13 +366,17 @@ public:
 
     auto seek(unsigned index) const -> decl::ParseControl {
         if(index >= argv_span.size()) {
-            return resume_from({});
+            return resume_from(std::span<std::string>{});
         }
         return resume_from(argv_span.subspan(index));
     }
 
     auto resume_from(std::span<std::string> next_argv) const -> decl::ParseControl {
         return decl::ParseControl::restart(next_argv);
+    }
+
+    auto resume_from(std::vector<std::string> next_argv) const -> decl::ParseControl {
+        return decl::ParseControl::restart(std::move(next_argv));
     }
 };
 
@@ -433,7 +439,6 @@ std::string check_valid(const T& options,
     if(!err.empty()) {
         return err;
     }
-
     // check category requirements
     const auto& c_map = storage.category_map();
     std::set<const decl::Category*> required_categories;
@@ -442,6 +447,12 @@ std::string check_valid(const T& options,
         const auto* category = c_map[i];
         if(category != nullptr && category->required) {
             required_categories.insert(category);
+        }
+    }
+    if(storage.has_trailing_option()) {
+        if(const auto* trailing = storage.trailing_category();
+           trailing != nullptr && trailing->required) {
+            required_categories.insert(trailing);
         }
     }
     for(const auto* category: required_categories) {
@@ -474,15 +485,19 @@ std::expected<Invocation<T, State>, ParseError>
     Invocation<T, State> res{};
     ParseError err;
     std::span<std::string> current_argv = argv;
+    std::shared_ptr<std::vector<std::string>> current_owned_argv{};
     bool stopped_during_parse = false;
     res.original_argv = argv;
     res.active_argv = current_argv;
+    res.owned_active_argv = current_owned_argv;
     res.state = std::move(initial_state);
 
     while(true) {
         bool restart_requested = false;
         std::span<std::string> restart_argv{};
+        std::shared_ptr<std::vector<std::string>> restart_owned_argv{};
         res.active_argv = current_argv;
+        res.owned_active_argv = current_owned_argv;
         const auto argv_view =
             std::span<const std::string>(current_argv.data(), current_argv.size());
 
@@ -574,6 +589,18 @@ std::expected<Invocation<T, State>, ParseError>
                         case decl::ParseControl::Action::Restart:
                             restart_requested = true;
                             restart_argv = control.next_argv;
+                            restart_owned_argv = control.owned_next_argv;
+                            if(!restart_owned_argv && current_owned_argv &&
+                               !current_owned_argv->empty()) {
+                                std::less<std::string*> ptr_less;
+                                auto* begin = current_owned_argv->data();
+                                auto* end = begin + current_owned_argv->size();
+                                auto* cursor = restart_argv.data();
+                                if(cursor != nullptr && !ptr_less(cursor, begin) &&
+                                   !ptr_less(end, cursor)) {
+                                    restart_owned_argv = current_owned_argv;
+                                }
+                            }
                             return false;
                     }
                     return true;
@@ -601,6 +628,7 @@ std::expected<Invocation<T, State>, ParseError>
         }
 
         current_argv = restart_argv;
+        current_owned_argv = std::move(restart_owned_argv);
         res.next_index = 0;
     }
     if(!err.message.empty()) {
@@ -795,12 +823,14 @@ public:
             "Command::after only supports member pointer paths ending at a deco " "option member.");
         using ValueTy = typename OptionTy::result_type;
         using FnTy = std::remove_cvref_t<Fn>;
-        static_assert(
-            std::is_invocable_r_v<decl::ParseControl, FnTy&, ParseStep<T, ValueTy, State>&> ||
-                std::is_invocable_r_v<decl::ParseControl,
-                                      FnTy&,
-                                      const ParseStep<T, ValueTy, State>&>,
-            "Command::after callback must return ParseControl and accept ParseStep.");
+        if constexpr(!std::is_invocable_r_v<decl::ParseControl,
+                                            FnTy&,
+                                            ParseStep<T, ValueTy, State>&>) {
+            static_assert(std::is_invocable_r_v<decl::ParseControl,
+                                                FnTy&,
+                                                const ParseStep<T, ValueTy, State>&>,
+                          "Command::after callback must return ParseControl and accept ParseStep.");
+        }
 
         AfterHook hook;
         hook.matches = [](T& options, decl::DecoOptionBase* accessor) {

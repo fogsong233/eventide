@@ -47,28 +47,26 @@ using OptionalResultType = OptionalTrait<Ty>::type;
 
 template <typename Ty>
 concept CustomStringResultTy = requires(BaseResultTy<Ty>& value, std::string_view sv) {
-    requires std::convertible_to<OptionalResultType<decltype(value.into(sv))>, std::string_view>;
+    requires std::is_same_v<OptionalResultType<decltype(value.into(sv))>, std::string>;
 };
 
 template <typename Ty>
 concept CustomStringResultTyWithContext =
     requires(BaseResultTy<Ty>& value, std::string_view sv, const decl::IntoContext& ctx) {
-        requires std::convertible_to<OptionalResultType<decltype(value.into(sv, ctx))>,
-                                     std::string_view>;
+        requires std::is_same_v<OptionalResultType<decltype(value.into(sv, ctx))>, std::string>;
     };
 
 template <typename Ty>
-concept CustomStringVectorResultTy = requires(BaseResultTy<Ty>& value,
-                                              std::vector<std::string_view>& vals) {
-    requires std::convertible_to<OptionalResultType<decltype(value.into(vals))>, std::string_view>;
-};
+concept CustomStringVectorResultTy =
+    requires(BaseResultTy<Ty>& value, std::vector<std::string_view>& vals) {
+        requires std::is_same_v<OptionalResultType<decltype(value.into(vals))>, std::string>;
+    };
 
 template <typename Ty>
 concept CustomStringVectorResultTyWithContext = requires(BaseResultTy<Ty>& value,
                                                          std::vector<std::string_view>& vals,
                                                          const decl::IntoContext& ctx) {
-    requires std::convertible_to<OptionalResultType<decltype(value.into(vals, ctx))>,
-                                 std::string_view>;
+    requires std::is_same_v<OptionalResultType<decltype(value.into(vals, ctx))>, std::string>;
 };
 
 template <typename Ty>

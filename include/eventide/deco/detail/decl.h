@@ -6,6 +6,7 @@
 #include <concepts>
 #include <cstdlib>
 #include <format>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -98,22 +99,40 @@ struct ParseControl {
 
     Action action = Action::Continue;
     std::span<std::string> next_argv{};
+    std::shared_ptr<std::vector<std::string>> owned_next_argv{};
 
-    constexpr ParseControl() = default;
+    ParseControl() = default;
 
-    constexpr ParseControl(Action action, std::span<std::string> next_argv = {}) :
-        action(action), next_argv(next_argv) {}
+    ParseControl(Action action,
+                 std::span<std::string> next_argv = {},
+                 std::shared_ptr<std::vector<std::string>> owned_next_argv = {}) :
+        action(action), next_argv(next_argv), owned_next_argv(std::move(owned_next_argv)) {}
 
-    constexpr static auto next() -> ParseControl {
+    static auto next() -> ParseControl {
         return {};
     }
 
-    constexpr static auto stop() -> ParseControl {
+    static auto stop() -> ParseControl {
         return ParseControl(Action::Stop);
     }
 
-    constexpr static auto restart(std::span<std::string> next_argv) -> ParseControl {
+    /// Restart parsing with a non-owning argv view.
+    ///
+    /// IMPORTANT: `next_argv` must outlive the parsing session (and any returned Invocation that
+    /// exposes `argv()`).
+    /// For callback-local rewritten argv, use the `std::vector<std::string>` overload.
+    static auto restart(std::span<std::string> next_argv) -> ParseControl {
         return ParseControl(Action::Restart, next_argv);
+    }
+
+    /// Restart parsing with a new, owned argv snapshot.
+    ///
+    /// This overload is safe to use with callback-local containers, e.g.
+    /// `std::vector<std::string> rewritten; return step.restart(std::move(rewritten));`.
+    static auto restart(std::vector<std::string> next_argv) -> ParseControl {
+        auto owned = std::make_shared<std::vector<std::string>>(std::move(next_argv));
+        auto view = std::span<std::string>(owned->data(), owned->size());
+        return ParseControl(Action::Restart, view, std::move(owned));
     }
 };
 
@@ -148,16 +167,20 @@ struct ParseStep {
         return *parsed_value;
     }
 
-    constexpr auto next() const -> ParseControl {
+    auto next() const -> ParseControl {
         return ParseControl::next();
     }
 
-    constexpr auto stop() const -> ParseControl {
+    auto stop() const -> ParseControl {
         return ParseControl::stop();
     }
 
-    constexpr auto restart(std::span<std::string> next_argv) const -> ParseControl {
+    auto restart(std::span<std::string> next_argv) const -> ParseControl {
         return ParseControl::restart(next_argv);
+    }
+
+    auto restart(std::vector<std::string> next_argv) const -> ParseControl {
+        return ParseControl::restart(std::move(next_argv));
     }
 };
 
@@ -485,27 +508,6 @@ inline bool iequals_ascii(std::string_view lhs, std::string_view rhs) {
     return true;
 }
 
-template <typename ErrorTy>
-std::optional<std::string> normalize_into_error(const std::optional<ErrorTy>& err,
-                                                const IntoContext& context = {}) {
-    if(!err.has_value()) {
-        return std::nullopt;
-    }
-    std::string message{std::string_view(*err)};
-    if(cli::text::looks_like_rendered_diagnostic(message)) {
-        return message;
-    }
-    return context.format_error(message);
-}
-
-template <typename ErrorTy>
-std::optional<std::string> stringify_into_error(const std::optional<ErrorTy>& err) {
-    if(!err.has_value()) {
-        return std::nullopt;
-    }
-    return std::string{std::string_view(*err)};
-}
-
 template <typename ResTy>
 std::optional<std::string> parse_primitive_scalar(ResTy& out, std::string_view text) {
     if constexpr(std::same_as<ResTy, bool>) {
@@ -565,12 +567,10 @@ std::optional<std::string> assign_scalar(std::optional<ResTy>& target,
                                          const IntoContext& context = {}) {
     if constexpr(trait::CustomStringResultTyWithContext<ResTy>) {
         auto& res = target.emplace();
-        const auto err = res.into(text, context);
-        return stringify_into_error(err);
+        return res.into(text, context);
     } else if constexpr(trait::CustomStringResultTy<ResTy>) {
         auto& res = target.emplace();
-        const auto err = res.into(text);
-        return normalize_into_error(err, context);
+        return res.into(text);
     } else {
         ResTy parsed{};
         if(auto err = parse_primitive_scalar(parsed, text)) {
@@ -588,13 +588,11 @@ std::optional<std::string> assign_vector(std::optional<ResTy>& target,
     if constexpr(trait::CustomStringVectorResultTyWithContext<ResTy>) {
         auto& res = target.emplace();
         std::vector<std::string_view> custom_values(values.begin(), values.end());
-        const auto err = res.into(custom_values, context);
-        return stringify_into_error(err);
+        return res.into(custom_values, context);
     } else if constexpr(trait::CustomStringVectorResultTy<ResTy>) {
         auto& res = target.emplace();
         std::vector<std::string_view> custom_values(values.begin(), values.end());
-        const auto err = res.into(custom_values);
-        return normalize_into_error(err, context);
+        return res.into(custom_values);
     } else {
         using item_type = typename ResTy::value_type;
         ResTy parsed;

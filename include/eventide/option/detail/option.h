@@ -116,14 +116,17 @@ public:
     }
 
     unsigned num_args() const {
+        assert(this->info && "Must have a valid info!");
         return this->info->param;
     }
 
     bool has_no_opt_as_input() const {
+        assert(this->info && "Must have a valid info!");
         return this->info->flags & RenderAsInput;
     }
 
     RenderStyleKind render_style() const {
+        assert(this->info && "Must have a valid info!");
         if(this->info->flags & RenderJoined)
             return RenderJoinedStyle;
         if(this->info->flags & RenderSeparate)
@@ -148,11 +151,13 @@ public:
 
     /// Test if this option has the flag val.
     bool has_flag(unsigned val) const {
+        assert(this->info && "Must have a valid info!");
         return this->info->flags & val;
     }
 
     /// Test if this option has the visibility flag Val.
     bool has_visibility_flag(unsigned val) const {
+        assert(this->info && "Must have a valid info!");
         return this->info->visibility & val;
     }
 
