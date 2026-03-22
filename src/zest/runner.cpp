@@ -220,6 +220,7 @@ namespace eventide::zest {
 
 int run_cli(int argc, char** argv, std::string_view command_overview) {
     auto args = deco::util::argvify(argc, argv);
+    deco::cli::text::set_default_renderer(deco::cli::text::ModernRenderer());
     deco::cli::Dispatcher<ZestCliOptions> dispatcher(command_overview);
 
     auto parsed = deco::cli::parse<ZestCliOptions>(args);
