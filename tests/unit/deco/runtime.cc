@@ -1041,21 +1041,31 @@ struct CatterOpt {
         std::optional<std::string> into(std::string_view input,
                                         const deco::decl::IntoContext& ctx) {
             namespace fs = std::filesystem;
-            try {
-                path = input;
-                if(fs::exists(path)) {
-                    if(fs::is_directory(path)) {
-                        return ctx.format_error("a file is needed");
-                    } else if(fs::is_regular_file(path)) {
-                        return std::nullopt;
-                    }
-                } else {
-                    return ctx.format_error("the path does not exist!");
+            std::error_code ec;
+
+            path = input;
+            if(!fs::exists(path, ec)) {
+                if(ec) {
+                    return ctx.format_error(std::format("filesystem error: {}", ec.message()));
                 }
-                return ctx.format_error("unsupported script path");
-            } catch(const fs::filesystem_error& err) {
-                return ctx.format_error(std::format("filesystem error: {}", err.what()));
+                return ctx.format_error("the path does not exist!");
             }
+
+            if(fs::is_directory(path, ec)) {
+                return ctx.format_error("a file is needed");
+            }
+            if(ec) {
+                return ctx.format_error(std::format("filesystem error: {}", ec.message()));
+            }
+
+            if(fs::is_regular_file(path, ec)) {
+                return std::nullopt;
+            }
+            if(ec) {
+                return ctx.format_error(std::format("filesystem error: {}", ec.message()));
+            }
+
+            return ctx.format_error("unsupported script path");
         }
     };
 

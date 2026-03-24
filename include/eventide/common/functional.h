@@ -109,7 +109,8 @@ private:
             using ClassType = std::remove_reference_t<Class>;
             return function_ref(
                 [](const function_ref* self, Args&... args) -> R {
-                    auto& fn = *const_cast<ClassType*>(static_cast<const ClassType*>(self->erased.ctx));
+                    auto& fn =
+                        *const_cast<ClassType*>(static_cast<const ClassType*>(self->erased.ctx));
                     return invoke_ret<R>(fn, static_cast<Args&&>(args)...);
                 },
                 Erased{.ctx = &invocable});
@@ -132,7 +133,9 @@ public:
     template <typename... CallArgs>
     constexpr R operator()(CallArgs&&... args) const {
         static_assert(
-            requires(Sign* fn, CallArgs&&... args) { fn(std::forward<CallArgs>(args)...); },
+            requires(Sign* fn, CallArgs&&... call_args) {
+                fn(std::forward<CallArgs>(call_args)...);
+            },
             "invocable object must be callable with the given arguments");
         return proxy(this, args...);
     }
@@ -310,13 +313,14 @@ public:
     template <typename Class>
         requires (!std::is_same_v<std::remove_cvref_t<Class>, function>) &&
                  std::is_invocable_r_v<R, Class, Args...>
-    constexpr function(Class&& invocable) :
-        function(make(std::forward<Class>(invocable))) {}
+    constexpr function(Class&& invocable) : function(make(std::forward<Class>(invocable))) {}
 
     template <typename... CallArgs>
     constexpr R operator()(CallArgs&&... args) {
         static_assert(
-            requires(Sign* fn, CallArgs&&... args) { fn(std::forward<CallArgs>(args)...); },
+            requires(Sign* fn, CallArgs&&... call_args) {
+                fn(std::forward<CallArgs>(call_args)...);
+            },
             "invocable object must be callable with the given arguments");
         assert(vptr && "Attempting to call an empty function object");
         return vptr->proxy(this, args...);
@@ -413,7 +417,9 @@ private:
                     return (static_cast<const ClassType*>(self->storage.erased.ctx)->*MemFn::get())(
                         static_cast<Args&&>(args)...);
                 },
-                [](function* self) { delete static_cast<const ClassType*>(self->storage.erased.ctx); }};
+                [](function* self) {
+                    delete static_cast<const ClassType*>(self->storage.erased.ctx);
+                }};
 
             return function(
                 &vt,
@@ -499,13 +505,14 @@ public:
     template <typename Class>
         requires (!std::is_same_v<std::remove_cvref_t<Class>, function>) &&
                  std::is_invocable_r_v<R, const std::remove_reference_t<Class>&, Args...>
-    constexpr function(Class&& invocable) :
-        function(make(std::forward<Class>(invocable))) {}
+    constexpr function(Class&& invocable) : function(make(std::forward<Class>(invocable))) {}
 
     template <typename... CallArgs>
     constexpr R operator()(CallArgs&&... args) const {
         static_assert(
-            requires(Sign* fn, CallArgs&&... args) { fn(std::forward<CallArgs>(args)...); },
+            requires(Sign* fn, CallArgs&&... call_args) {
+                fn(std::forward<CallArgs>(call_args)...);
+            },
             "invocable object must be callable with the given arguments");
         assert(vptr && "Attempting to call an empty function object");
         return vptr->proxy(this, args...);
