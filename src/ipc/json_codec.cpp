@@ -54,7 +54,10 @@ struct json_rpc_incoming {
     std::optional<protocol::RequestID> id;
     std::optional<std::string> method;
     std::optional<serde::RawValue> params;
-    serde::RawValue result;
+    // Not optional<RawValue> because "result": null is a valid success
+    // response — optional would lose it as nullopt. defaulted<RawValue>
+    // keeps absent → empty(), null → "null" text.
+    serde::defaulted<serde::RawValue> result;
     std::optional<Error> error;
 };
 
