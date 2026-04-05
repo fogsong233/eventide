@@ -28,7 +28,7 @@ template <typename Config = config::default_config>
 class Deserializer {
 public:
     using config_type = Config;
-    using error_type = error_kind;
+    using error_type = bincode::error;
 
     template <typename T>
     using result_t = std::expected<T, error_type>;
@@ -42,7 +42,7 @@ public:
 
         result_t<bool> has_next() {
             if(!deserializer.is_valid) {
-                return std::unexpected(deserializer.current_error());
+                return std::unexpected(deserializer.last_error);
             }
             return read_count < expected_count;
         }
@@ -61,12 +61,12 @@ public:
         }
 
         status_t skip_element() {
-            return deserializer.mark_invalid(error_type::unsupported_operation);
+            return deserializer.mark_invalid(error_kind::unsupported_operation);
         }
 
         status_t end() {
             if(!deserializer.is_valid) {
-                return std::unexpected(deserializer.current_error());
+                return std::unexpected(deserializer.last_error);
             }
             if(read_count != expected_count) {
                 return deserializer.mark_invalid(error_type::invalid_state);
@@ -88,7 +88,7 @@ public:
         template <typename T>
         status_t deserialize_element(T& value) {
             if(!deserializer.is_valid) {
-                return std::unexpected(deserializer.current_error());
+                return std::unexpected(deserializer.last_error);
             }
             if(read_count >= expected_count) {
                 return deserializer.mark_invalid(error_type::invalid_state);
@@ -101,12 +101,12 @@ public:
         }
 
         status_t skip_element() {
-            return deserializer.mark_invalid(error_type::unsupported_operation);
+            return deserializer.mark_invalid(error_kind::unsupported_operation);
         }
 
         status_t end() {
             if(!deserializer.is_valid) {
-                return std::unexpected(deserializer.current_error());
+                return std::unexpected(deserializer.last_error);
             }
             if(read_count != expected_count) {
                 return deserializer.mark_invalid(error_type::invalid_state);
@@ -126,24 +126,24 @@ public:
             deserializer(deserializer) {}
 
         result_t<std::optional<std::string_view>> next_key() {
-            return std::unexpected(error_type::unsupported_operation);
+            return deserializer.mark_invalid(error_kind::unsupported_operation);
         }
 
         status_t invalid_key(std::string_view /*key_name*/) {
-            return deserializer.mark_invalid(error_type::unsupported_operation);
+            return deserializer.mark_invalid(error_kind::unsupported_operation);
         }
 
         template <typename T>
         status_t deserialize_value(T& /*value*/) {
-            return deserializer.mark_invalid(error_type::unsupported_operation);
+            return deserializer.mark_invalid(error_kind::unsupported_operation);
         }
 
         status_t skip_value() {
-            return deserializer.mark_invalid(error_type::unsupported_operation);
+            return deserializer.mark_invalid(error_kind::unsupported_operation);
         }
 
         status_t end() {
-            return deserializer.mark_invalid(error_type::unsupported_operation);
+            return deserializer.mark_invalid(error_kind::unsupported_operation);
         }
 
     private:
@@ -169,15 +169,15 @@ public:
     }
 
     [[nodiscard]] error_type error() const noexcept {
-        return current_error();
+        return last_error;
     }
 
     status_t finish() {
         if(!is_valid) {
-            return std::unexpected(current_error());
+            return std::unexpected(last_error);
         }
         if(offset != bytes.size()) {
-            return mark_invalid(error_type::trailing_bytes);
+            return mark_invalid(error_kind::trailing_bytes);
         }
         return {};
     }
@@ -239,7 +239,7 @@ public:
         ETD_EXPECTED_TRY_V(auto length, read_length());
 
         if(offset + length > bytes.size()) {
-            return mark_invalid(error_type::unexpected_eof);
+            return mark_invalid(error_kind::unexpected_eof);
         }
 
         if(length == 0) {
@@ -257,7 +257,7 @@ public:
         ETD_EXPECTED_TRY_V(auto length, read_length());
 
         if(offset + length > bytes.size()) {
-            return mark_invalid(error_type::unexpected_eof);
+            return mark_invalid(error_kind::unexpected_eof);
         }
 
         if(length == 0) {
@@ -280,8 +280,7 @@ public:
         if(tag == 1U) {
             return false;
         }
-        auto status = mark_invalid(error_type::type_mismatch);
-        return std::unexpected(status.error());
+        return mark_invalid(error_type::type_mismatch);
     }
 
     template <typename... Ts>
@@ -290,7 +289,7 @@ public:
 
         constexpr std::size_t variant_size = sizeof...(Ts);
         if(index >= variant_size) {
-            return mark_invalid(error_type::invalid_variant_index);
+            return mark_invalid(error_kind::invalid_variant_index);
         }
 
         std::expected<void, error_type> status{};
@@ -309,7 +308,7 @@ public:
         }(std::make_index_sequence<variant_size>{});
 
         if(!matched) {
-            return mark_invalid(error_type::invalid_variant_index);
+            return mark_invalid(error_kind::invalid_variant_index);
         }
         if(!status) {
             return std::unexpected(status.error());
@@ -365,13 +364,12 @@ private:
         requires std::integral<T>
     result_t<T> read_integral() {
         if(!is_valid) {
-            return std::unexpected(current_error());
+            return std::unexpected(last_error);
         }
 
         using unsigned_t = std::make_unsigned_t<T>;
         if(offset + sizeof(unsigned_t) > bytes.size()) {
-            (void)mark_invalid(error_type::unexpected_eof);
-            return std::unexpected(current_error());
+            return mark_invalid(error_kind::unexpected_eof);
         }
 
         unsigned_t raw = 0;
@@ -396,32 +394,27 @@ private:
         ETD_EXPECTED_TRY_V(auto raw, read_integral<std::uint64_t>());
 
         if(raw > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
-            (void)mark_invalid(error_type::number_out_of_range);
-            return std::unexpected(current_error());
+            return mark_invalid(error_type::number_out_of_range);
         }
 
         return static_cast<std::size_t>(raw);
     }
 
-    status_t mark_invalid(error_type error) {
+    std::unexpected<error_type> mark_invalid(error_type error) {
         is_valid = false;
         last_error = error;
-        return std::unexpected(error);
-    }
-
-    error_type current_error() const {
-        return is_valid ? error_type::ok : last_error;
+        return std::unexpected(last_error);
     }
 
 private:
     std::span<const std::byte> bytes{};
     std::size_t offset = 0;
     bool is_valid = true;
-    error_type last_error = error_type::ok;
+    error_type last_error = error_kind::ok;
 };
 
 template <typename Config = config::default_config, typename T>
-auto from_bytes(std::span<const std::byte> bytes, T& value) -> std::expected<void, error_kind> {
+auto from_bytes(std::span<const std::byte> bytes, T& value) -> std::expected<void, error> {
     Deserializer<Config> deserializer(bytes);
     if(!deserializer.valid()) {
         return std::unexpected(deserializer.error());
@@ -433,26 +426,25 @@ auto from_bytes(std::span<const std::byte> bytes, T& value) -> std::expected<voi
 }
 
 template <typename Config = config::default_config, typename T>
-auto from_bytes(std::span<const std::uint8_t> bytes, T& value) -> std::expected<void, error_kind> {
+auto from_bytes(std::span<const std::uint8_t> bytes, T& value) -> std::expected<void, error> {
     return from_bytes<Config>(
         std::span<const std::byte>(reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()),
         value);
 }
 
 template <typename Config = config::default_config, typename T>
-auto from_bytes(const std::vector<std::byte>& bytes, T& value) -> std::expected<void, error_kind> {
+auto from_bytes(const std::vector<std::byte>& bytes, T& value) -> std::expected<void, error> {
     return from_bytes<Config>(std::span<const std::byte>(bytes.data(), bytes.size()), value);
 }
 
 template <typename Config = config::default_config, typename T>
-auto from_bytes(const std::vector<std::uint8_t>& bytes, T& value)
-    -> std::expected<void, error_kind> {
+auto from_bytes(const std::vector<std::uint8_t>& bytes, T& value) -> std::expected<void, error> {
     return from_bytes<Config>(std::span<const std::uint8_t>(bytes.data(), bytes.size()), value);
 }
 
 template <typename T, typename Config = config::default_config>
     requires std::default_initializable<T>
-auto from_bytes(std::span<const std::byte> bytes) -> std::expected<T, error_kind> {
+auto from_bytes(std::span<const std::byte> bytes) -> std::expected<T, error> {
     T value{};
     ETD_EXPECTED_TRY(from_bytes<Config>(bytes, value));
     return value;
@@ -460,7 +452,7 @@ auto from_bytes(std::span<const std::byte> bytes) -> std::expected<T, error_kind
 
 template <typename T, typename Config = config::default_config>
     requires std::default_initializable<T>
-auto from_bytes(std::span<const std::uint8_t> bytes) -> std::expected<T, error_kind> {
+auto from_bytes(std::span<const std::uint8_t> bytes) -> std::expected<T, error> {
     T value{};
     ETD_EXPECTED_TRY(from_bytes<Config>(bytes, value));
     return value;
@@ -468,13 +460,13 @@ auto from_bytes(std::span<const std::uint8_t> bytes) -> std::expected<T, error_k
 
 template <typename T, typename Config = config::default_config>
     requires std::default_initializable<T>
-auto from_bytes(const std::vector<std::byte>& bytes) -> std::expected<T, error_kind> {
+auto from_bytes(const std::vector<std::byte>& bytes) -> std::expected<T, error> {
     return from_bytes<T, Config>(std::span<const std::byte>(bytes.data(), bytes.size()));
 }
 
 template <typename T, typename Config = config::default_config>
     requires std::default_initializable<T>
-auto from_bytes(const std::vector<std::uint8_t>& bytes) -> std::expected<T, error_kind> {
+auto from_bytes(const std::vector<std::uint8_t>& bytes) -> std::expected<T, error> {
     return from_bytes<T, Config>(std::span<const std::uint8_t>(bytes.data(), bytes.size()));
 }
 

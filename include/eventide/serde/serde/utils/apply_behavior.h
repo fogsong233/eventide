@@ -1,6 +1,7 @@
 #pragma once
 
 #include <expected>
+#include <format>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -81,7 +82,8 @@ constexpr auto apply_deserialize_behavior(value_t& value, Reader&& read, WithFn&
             value = *parsed;
             return std::expected<void, E>{};
         } else {
-            return std::expected<void, E>(std::unexpected(E::type_mismatch));
+            return std::expected<void, E>(std::unexpected(
+                E::custom(std::format("unknown enum string value '{}'", enum_text))));
         }
     } else {
         return std::nullopt;

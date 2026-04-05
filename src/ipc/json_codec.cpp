@@ -15,13 +15,10 @@ Result<std::string>
                          protocol::ErrorCode code = protocol::ErrorCode::InternalError) {
     auto serialized = serde::json::to_string(value);
     if(!serialized) {
-        return outcome_error(
-            Error(code, std::string(serde::json::error_message(serialized.error()))));
+        return outcome_error(Error(code, serialized.error().to_string()));
     }
     return std::move(*serialized);
 }
-
-// --- Outgoing message structs (use RawValue to avoid double serialization) ---
 
 struct outgoing_request_message {
     std::string jsonrpc = "2.0";
@@ -48,8 +45,6 @@ struct outgoing_error_response_message {
     Error error;
 };
 
-// --- Incoming message envelope (deserialized via serde) ---
-
 struct json_rpc_incoming {
     std::optional<protocol::RequestID> id;
     std::optional<std::string> method;
@@ -66,8 +61,8 @@ struct json_rpc_incoming {
 IncomingMessage JsonCodec::parse_message(std::string_view payload) {
     auto envelope = serde::json::parse<json_rpc_incoming>(payload);
     if(!envelope) {
-        return IncomingParseError{Error(protocol::ErrorCode::ParseError,
-                                        std::string(serde::json::error_message(envelope.error())))};
+        return IncomingParseError{
+            Error(protocol::ErrorCode::ParseError, envelope.error().to_string())};
     }
 
     auto raw_params =

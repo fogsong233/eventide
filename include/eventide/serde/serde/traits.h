@@ -89,16 +89,15 @@ concept tuple_like = requires { typename std::tuple_size<std::remove_cvref_t<T>>
 template <typename A, typename T, typename E>
 concept result_as = std::same_as<A, std::expected<T, E>>;
 
-/// Error concept: all serde error types must provide these named enumerators
-/// and an ADL-visible `error_message()` function. Modeled after Rust serde's
-/// `de::Error` / `ser::Error` traits — backends keep their own concrete types
-/// but the core framework can construct common errors without if-constexpr probing.
+/// Error concept: all serde error types must provide these named enumerators.
+/// Modeled after Rust serde's `de::Error` / `ser::Error` traits — backends keep
+/// their own concrete types but the core framework can construct common errors
+/// without if-constexpr probing.
 template <typename E>
-concept serde_error = requires {
+concept serde_error_like = requires {
     { E::type_mismatch } -> std::convertible_to<E>;
     { E::number_out_of_range } -> std::convertible_to<E>;
     { E::invalid_state } -> std::convertible_to<E>;
-    { error_message(E{}) } -> std::convertible_to<std::string_view>;
 };
 
 template <typename S,
@@ -109,19 +108,19 @@ template <typename S,
           typename SerializeMap = typename S::SerializeMap,
           typename SerializeStruct = typename S::SerializeStruct>
 concept serializer_like =
-    serde_error<E> && requires(S& s,
-                               bool b,
-                               char c,
-                               std::int64_t i,
-                               std::uint64_t u,
-                               double f,
-                               std::string_view text,
-                               std::span<const std::byte> bytes,
-                               std::optional<std::size_t> len,
-                               std::size_t tuple_len,
-                               const std::variant<int, std::string>& variant_value,
-                               const int& key,
-                               const int& value) {
+    serde_error_like<E> && requires(S& s,
+                                    bool b,
+                                    char c,
+                                    std::int64_t i,
+                                    std::uint64_t u,
+                                    double f,
+                                    std::string_view text,
+                                    std::span<const std::byte> bytes,
+                                    std::optional<std::size_t> len,
+                                    std::size_t tuple_len,
+                                    const std::variant<int, std::string>& variant_value,
+                                    const int& key,
+                                    const int& value) {
         { s.serialize_bool(b) } -> result_as<T, E>;
         { s.serialize_int(i) } -> result_as<T, E>;
         { s.serialize_uint(u) } -> result_as<T, E>;
@@ -166,19 +165,19 @@ template <typename D,
           typename DeserializeMap = typename D::DeserializeMap,
           typename DeserializeStruct = typename D::DeserializeStruct>
 concept deserializer_like =
-    serde_error<E> && requires(D& d,
-                               bool& b,
-                               char& c,
-                               std::int64_t& i64,
-                               std::uint64_t& u64,
-                               double& f64,
-                               std::string& text,
-                               std::vector<std::byte>& bytes,
-                               std::optional<std::size_t> len,
-                               std::size_t tuple_len,
-                               std::string_view name,
-                               std::variant<int, std::string>& variant_value,
-                               int& value) {
+    serde_error_like<E> && requires(D& d,
+                                    bool& b,
+                                    char& c,
+                                    std::int64_t& i64,
+                                    std::uint64_t& u64,
+                                    double& f64,
+                                    std::string& text,
+                                    std::vector<std::byte>& bytes,
+                                    std::optional<std::size_t> len,
+                                    std::size_t tuple_len,
+                                    std::string_view name,
+                                    std::variant<int, std::string>& variant_value,
+                                    int& value) {
         { d.deserialize_bool(b) } -> result_as<void, E>;
         { d.deserialize_int(i64) } -> result_as<void, E>;
         { d.deserialize_uint(u64) } -> result_as<void, E>;
