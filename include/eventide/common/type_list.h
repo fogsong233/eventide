@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <cstddef>
 #include <type_traits>
 
 namespace eventide {
@@ -18,29 +19,6 @@ struct type_list_prepend<type_list<Ts...>, T> {
 
 template <typename List, typename T>
 using type_list_prepend_t = typename type_list_prepend<List, T>::type;
-
-template <typename List, typename T>
-struct type_list_append;
-
-template <typename... Ts, typename T>
-struct type_list_append<type_list<Ts...>, T> {
-    using type = type_list<Ts..., T>;
-};
-
-template <typename List, typename T>
-using type_list_append_t = typename type_list_append<List, T>::type;
-
-template <typename List, typename T>
-struct type_list_append_unique;
-
-template <typename... Ts, typename T>
-struct type_list_append_unique<type_list<Ts...>, T> {
-    using type =
-        std::conditional_t<(std::same_as<T, Ts> || ...), type_list<Ts...>, type_list<Ts..., T>>;
-};
-
-template <typename List, typename T>
-using type_list_append_unique_t = typename type_list_append_unique<List, T>::type;
 
 template <typename List, typename T>
 struct type_list_contains;
@@ -71,17 +49,6 @@ public:
 
 template <typename List, template <typename> typename Predicate>
 using type_list_filter_t = typename type_list_filter<List, Predicate>::type;
-
-template <typename List, template <typename> typename Mapper>
-struct type_list_transform;
-
-template <template <typename> typename Mapper, typename... Ts>
-struct type_list_transform<type_list<Ts...>, Mapper> {
-    using type = type_list<typename Mapper<Ts>::type...>;
-};
-
-template <typename List, template <typename> typename Mapper>
-using type_list_transform_t = typename type_list_transform<List, Mapper>::type;
 
 template <typename List>
 struct type_list_unique;
@@ -118,15 +85,59 @@ struct type_list_unique<type_list<Ts...>> {
 template <typename List>
 using type_list_unique_t = typename type_list_unique<List>::type;
 
-template <typename List, template <typename...> typename Target>
-struct type_list_apply;
+template <std::size_t I, typename List>
+struct type_list_element;
 
-template <typename... Ts, template <typename...> typename Target>
-struct type_list_apply<type_list<Ts...>, Target> {
-    using type = Target<Ts...>;
+template <std::size_t I, typename First, typename... Rest>
+struct type_list_element<I, type_list<First, Rest...>> :
+    type_list_element<I - 1, type_list<Rest...>> {};
+
+template <typename First, typename... Rest>
+struct type_list_element<0, type_list<First, Rest...>> {
+    using type = First;
 };
 
-template <typename List, template <typename...> typename Target>
-using type_list_apply_t = typename type_list_apply<List, Target>::type;
+template <std::size_t I, typename List>
+using type_list_element_t = typename type_list_element<I, List>::type;
+
+template <typename A, typename B>
+struct type_list_cat;
+
+template <typename... As, typename... Bs>
+struct type_list_cat<type_list<As...>, type_list<Bs...>> {
+    using type = type_list<As..., Bs...>;
+};
+
+template <typename A, typename B>
+using type_list_cat_t = typename type_list_cat<A, B>::type;
+
+template <typename... Lists>
+struct type_list_concat;
+
+template <>
+struct type_list_concat<> {
+    using type = type_list<>;
+};
+
+template <typename List>
+struct type_list_concat<List> {
+    using type = List;
+};
+
+template <typename First, typename Second, typename... Rest>
+struct type_list_concat<First, Second, Rest...> :
+    type_list_concat<type_list_cat_t<First, Second>, Rest...> {};
+
+template <typename... Lists>
+using type_list_concat_t = typename type_list_concat<Lists...>::type;
+
+template <typename List>
+struct type_list_size;
+
+template <typename... Ts>
+struct type_list_size<type_list<Ts...>> : std::integral_constant<std::size_t, sizeof...(Ts)> {};
+
+template <typename List>
+constexpr inline std::size_t type_list_size_v = type_list_size<List>::value;
 
 }  // namespace eventide
