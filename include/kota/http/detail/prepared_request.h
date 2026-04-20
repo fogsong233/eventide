@@ -4,8 +4,8 @@
 #include <string>
 
 #include "kota/http/detail/client_state.h"
-#include "kota/http/request.h"
-#include "kota/http/response.h"
+#include "kota/http/detail/request.h"
+#include "kota/http/detail/response.h"
 #include "kota/async/runtime/task.h"
 #include "kota/async/vocab/outcome.h"
 
@@ -21,7 +21,7 @@ struct prepared_request {
     std::string final_url;
     bool runtime_bound = false;
 
-    prepared_request() = default;
+    prepared_request() = delete;
 
     prepared_request(request req, std::shared_ptr<client_state> owner) noexcept;
 
@@ -52,6 +52,8 @@ struct prepared_request {
     bool apply_proxy() noexcept;
 
     bool apply_timeout() noexcept;
+
+    bool apply_curl_options() noexcept;
 
     bool ready() const noexcept;
 

@@ -20,16 +20,14 @@ task<void, http::error> request_openai(event_loop& loop) {
     http::client client({.timeout = 60s});
     auto api = client.on(loop);
 
-    auto req = api.post("http://.../v1/responses").header("authorization", "Bearer sk-114514");
-    if(auto json = req.json(response_request{
-           .model = "gpt-5.4",
-           .input = "Do you know ykiko and her project clice, a cpp lsp?",
-       });
-       !json) {
-        co_await fail(std::move(json.error()));
-    }
-
-    auto result = co_await std::move(req).send().or_fail();
+    auto result = co_await api.post("http://.../v1/responses")
+                      .header("authorization", "Bearer sk-114514")
+                      .json(response_request{
+                          .model = "gpt-5.4",
+                          .input = "Do you know ykiko and her project clice, a cpp lsp?",
+                      })
+                      .send()
+                      .or_fail();
 
     auto parsed = codec::json::Value::parse(result.text()).value();
     auto reply = parsed.as_ref()

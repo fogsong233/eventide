@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <concepts>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -10,9 +11,9 @@
 #include <utility>
 #include <vector>
 
-#include "kota/http/options.h"
-#include "kota/http/request.h"
-#include "kota/http/response.h"
+#include "kota/http/detail/options.h"
+#include "kota/http/detail/request.h"
+#include "kota/http/detail/response.h"
 #include "kota/async/io/loop.h"
 #include "kota/async/runtime/task.h"
 
@@ -31,8 +32,31 @@ class bound_client;
 
 namespace detail {
 
-task<response, error>
-    execute_with_state(request req, event_loop& loop, std::shared_ptr<client_state> owner);
+task<response, error> execute_with_state(request req,
+                                         event_loop& loop,
+                                         std::shared_ptr<client_state> owner);
+
+template <typename T>
+curl_option_hook make_curl_option(CURLoption option, T&& value) {
+    using stored_t = std::decay_t<T>;
+    static_assert(std::is_copy_constructible_v<stored_t>,
+                  "native curl option values must be copy constructible");
+
+    if constexpr(std::same_as<stored_t, std::string>) {
+        return [option, value = std::move(value)](CURL* easy) -> curl::easy_error {
+            return curl::setopt(easy, option, value.c_str());
+        };
+    } else if constexpr(std::same_as<stored_t, std::string_view>) {
+        std::string owned(value);
+        return [option, owned = std::move(owned)](CURL* easy) -> curl::easy_error {
+            return curl::setopt(easy, option, owned.c_str());
+        };
+    } else {
+        return [option, value = std::forward<T>(value)](CURL* easy) -> curl::easy_error {
+            return curl::setopt(easy, option, value);
+        };
+    }
+}
 
 }  // namespace detail
 
@@ -42,11 +66,17 @@ public:
                     event_loop* dispatch_loop,
                     request req) noexcept;
 
+    // Upsert a request header. Names are matched case-insensitively.
     request_builder& header(std::string name, std::string value);
 
+    // Append a query parameter. Repeated keys are preserved in insertion order.
     request_builder& query(std::string name, std::string value);
 
-    request_builder& cookie(std::string value);
+    // Set the raw Cookie header for this request.
+    request_builder& cookies(std::string value);
+
+    // Override the HTTP method string, for example "OPTIONS" or "PROPFIND".
+    request_builder& method(std::string value);
 
     request_builder& bearer_auth(std::string token);
 
@@ -62,14 +92,26 @@ public:
 
     request_builder& timeout(std::chrono::milliseconds value);
 
-    request_builder& no_cookies();
+    // Apply a native libcurl option to this request.
+    // The value is captured into an internal callable and applied right before dispatch.
+    // Type validation is intentionally left to the caller: the provided value must match
+    // the selected CURLOPT_* contract.
+    template <typename T>
+    request_builder& curl_option(CURLoption option, T&& value) {
+        spec.curl_options.push_back(detail::make_curl_option(option, std::forward<T>(value)));
+        return *this;
+    }
 
+    // Set the request body and force Content-Type: application/json.
     request_builder& json_text(std::string body);
 
+    // Encode fields as application/x-www-form-urlencoded and set the matching Content-Type.
     request_builder& form(std::vector<query_param> fields);
 
+    // Set the raw request body without touching Content-Type.
     request_builder& body(std::string body);
 
+    // Materialize the current request snapshot without sending it.
     request build(this auto&& self) {
         if constexpr(std::is_rvalue_reference_v<decltype(self)>) {
             return std::move(self.spec);
@@ -78,8 +120,26 @@ public:
         }
     }
 
+    // Send the request on the bound loop.
+    // Any staged builder error (for example JSON encoding failure) is surfaced here as a
+    // failed task before the request reaches libcurl.
     task<response, error> send(this auto&& self)
         requires (!std::is_const_v<std::remove_reference_t<decltype(self)>>) {
+        auto pending_error = [&]() -> std::optional<error> {
+            if(!self.staged_error) {
+                return std::nullopt;
+            }
+
+            if constexpr(std::is_rvalue_reference_v<decltype(self)>) {
+                return std::exchange(self.staged_error, std::nullopt);
+            } else {
+                return self.staged_error;
+            }
+        }();
+        if(pending_error) {
+            return failed(std::move(*pending_error));
+        }
+
         if(!self.owner) {
             return failed(
                 error::invalid_request("request_builder::send requires an owning client"));
@@ -91,21 +151,32 @@ public:
                 "request_builder::send requires a loop via client::bind or client.on"));
         }
 
+        auto owner = [&]() -> std::shared_ptr<client_state> {
+            if constexpr(std::is_rvalue_reference_v<decltype(self)>) {
+                return std::move(self.owner);
+            } else {
+                return self.owner;
+            }
+        }();
+
         return detail::execute_with_state(std::forward<decltype(self)>(self).build(),
                                           loop->get(),
-                                          self.owner);
+                                          std::move(owner));
     }
 
 #if KOTA_HTTP_HAS_CODEC_JSON
     template <typename T>
-    std::expected<void, error> json(const T& value) {
+    // Serialize a value as JSON, set the body and Content-Type, and keep chaining.
+    // Encoding failures are remembered on the builder and returned by send().
+    request_builder& json(const T& value) {
         auto encoded = codec::json::to_string(value);
         if(!encoded) {
-            return std::unexpected(error::json_encode(encoded.error().to_string()));
+            remember_error(error::json_encode(encoded.error().to_string()));
+            return *this;
         }
 
         json_text(std::move(*encoded));
-        return {};
+        return *this;
     }
 #endif
 
@@ -114,10 +185,12 @@ private:
     static std::optional<std::reference_wrapper<event_loop>>
         resolve_loop(const std::shared_ptr<client_state>& owner,
                      event_loop* dispatch_loop) noexcept;
+    void remember_error(error err) noexcept;
 
     std::shared_ptr<client_state> owner;
     event_loop* dispatch_loop = nullptr;
     request spec{};
+    std::optional<error> staged_error;
 };
 
 class client {
@@ -135,14 +208,17 @@ public:
     client(client&&) noexcept;
     client& operator=(client&&) noexcept;
 
+    // Attach a default dispatch loop used by send() / execute().
     client& bind(event_loop& loop) noexcept;
 
     bool is_bound() const noexcept;
 
+    // Create a lightweight loop-bound view without rebinding the client itself.
     bound_client on(event_loop& loop) & noexcept;
 
-    request_builder request(method verb, std::string url) const&;
-    request_builder request(method verb, std::string url) && = delete;
+    // Start a request with an arbitrary HTTP method string.
+    request_builder request(std::string method, std::string url) const&;
+    request_builder request(std::string method, std::string url) && = delete;
 
     request_builder get(std::string url) const&;
     request_builder get(std::string url) && = delete;
@@ -162,14 +238,14 @@ public:
     request_builder head(std::string url) const&;
     request_builder head(std::string url) && = delete;
 
+    // Dispatch a fully materialized request using the client's bound loop.
     task<response, error> execute(http::request req) const&;
     task<response, error> execute(http::request req) && = delete;
 
-    client& store_cookie(std::string url, std::string value);
-
-    std::vector<std::string> cookie_list() const;
-
-    void clear_cookies();
+    // Enable or disable automatic cookie handling for future requests created by this
+    // client. When disabled, requests neither record Set-Cookie nor use the shared
+    // cookie jar.
+    client& record_cookie(bool enabled = true) noexcept;
 
     std::optional<std::reference_wrapper<event_loop>> loop() const noexcept;
 
@@ -182,9 +258,10 @@ private:
 class bound_client {
 public:
     bound_client(std::shared_ptr<client_state> state, event_loop& loop) noexcept :
-        state(state), dispatch_loop(&loop) {}
+        state(std::move(state)), dispatch_loop(&loop) {}
 
-    request_builder request(method verb, std::string url) const noexcept;
+    // Start a request with an arbitrary HTTP method string on this view's loop.
+    request_builder request(std::string method, std::string url) const noexcept;
 
     request_builder get(std::string url) const noexcept;
 
@@ -198,12 +275,14 @@ public:
 
     request_builder head(std::string url) const noexcept;
 
+    // Dispatch a fully materialized request on this view's loop.
     task<response, error> execute(http::request req) const;
 
     event_loop& loop() const noexcept {
         return *dispatch_loop;
     }
 
+private:
     std::shared_ptr<client_state> state;
     event_loop* dispatch_loop = nullptr;
 };
@@ -214,11 +293,11 @@ public:
 
     explicit client_builder(event_loop& loop) noexcept;
 
+    // Set the loop that build() will bind the resulting client to.
     client_builder& bind(event_loop& loop) noexcept;
 
+    // Add or replace a default header copied into every new request builder.
     client_builder& default_header(std::string name, std::string value);
-
-    client_builder& default_cookie(std::string value);
 
     client_builder& user_agent(std::string value);
 
@@ -230,7 +309,13 @@ public:
 
     client_builder& timeout(std::chrono::milliseconds value);
 
-    client_builder& cookie_store(bool enabled = true);
+    // Apply a native libcurl option to every request created by the built client.
+    // Per-request curl_option() calls are applied later and may override these defaults.
+    template <typename T>
+    client_builder& curl_option(CURLoption option, T&& value) {
+        options.curl_options.push_back(detail::make_curl_option(option, std::forward<T>(value)));
+        return *this;
+    }
 
     client_builder& redirect(redirect_policy value);
 
@@ -250,10 +335,12 @@ public:
 
     client_builder& ca_path(std::string path);
 
+    // Construct a client. Runtime initialization failures are reported in the expected.
     std::expected<client, error> build() const&;
 
     std::expected<client, error> build() &&;
 
+private:
     event_loop* bound_loop = nullptr;
     client_options options{};
 };

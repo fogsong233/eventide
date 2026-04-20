@@ -17,7 +17,9 @@ add_library(kota_http STATIC)
 add_library(kota::http ALIAS kota_http)
 
 target_sources(kota_http PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/curl.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/execute.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/manager.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/prepared_request.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/request.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/response.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/runtime.cpp"

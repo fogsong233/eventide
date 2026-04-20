@@ -1,4 +1,4 @@
-#include "kota/http/response.h"
+#include "kota/http/detail/response.h"
 
 #include <cstddef>
 #include <span>
@@ -8,6 +8,10 @@
 #include "kota/http/detail/util.h"
 
 namespace kota::http {
+
+std::string error::message() const {
+    return http::message(*this);
+}
 
 std::string message(const error& err) {
     switch(err.kind) {

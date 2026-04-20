@@ -3,11 +3,8 @@
 #include <functional>
 #include <mutex>
 #include <optional>
-#include <string_view>
-#include <vector>
-
-#include "kota/http/curl.h"
-#include "kota/http/options.h"
+#include "kota/http/detail/curl.h"
+#include "kota/http/detail/options.h"
 #include "kota/async/io/loop.h"
 
 namespace kota::http {
@@ -23,13 +20,9 @@ struct client_state {
 
     const client_options& options() const noexcept;
 
-    bool bind_easy(CURL* easy, bool enable_cookie_store) const noexcept;
+    void record_cookie(bool enabled) noexcept;
 
-    void clear_cookies();
-
-    void store_cookie(std::string_view url, std::string_view value);
-
-    std::vector<std::string> cookie_list() const;
+    bool bind_easy(CURL* easy, bool enable_record_cookie) const noexcept;
 
     event_loop* bound_loop = nullptr;
     client_options defaults{};

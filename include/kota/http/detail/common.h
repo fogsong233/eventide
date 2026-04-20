@@ -1,21 +1,28 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 
-#include "kota/http/curl.h"
+#include "kota/http/detail/curl.h"
 
 namespace kota::http {
 
-enum class method {
-    get,
-    post,
-    put,
-    patch,
-    del,
-    head,
-};
+namespace method {
+
+inline constexpr std::string_view get = "GET";
+inline constexpr std::string_view post = "POST";
+inline constexpr std::string_view put = "PUT";
+inline constexpr std::string_view patch = "PATCH";
+inline constexpr std::string_view del = "DELETE";
+inline constexpr std::string_view head = "HEAD";
+inline constexpr std::string_view options = "OPTIONS";
+inline constexpr std::string_view trace = "TRACE";
+inline constexpr std::string_view connect = "CONNECT";
+
+}  // namespace method
 
 enum class error_kind {
     curl,
@@ -39,6 +46,8 @@ struct error {
     static error json_encode(std::string detail) {
         return {.kind = error_kind::json_encode, .detail = std::move(detail)};
     }
+
+    std::string message() const;
 };
 
 std::string message(const error& err);
@@ -52,6 +61,8 @@ struct query_param {
     std::string name;
     std::string value;
 };
+
+using curl_option_hook = std::function<curl::easy_error(CURL*)>;
 
 struct proxy {
     std::string url;

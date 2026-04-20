@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 
+#include "kota/http/detail/manager.h"
 #include "kota/http/http.h"
 #include "kota/async/async.h"
 
@@ -21,10 +22,8 @@ http::client build_demo_client() {
     auto built = http::client::builder()
                      .default_header("accept", "application/json")
                      .default_header("x-demo-client", "eventide")
-                     .default_cookie("demo=1; theme=light")
                      .user_agent("eventide-http-showcase/1.0")
                      .timeout(10s)
-                     .cookie_store(true)
                      .redirect(http::redirect_policy::limited(5))
                      .referer(true)
                      .https_only(false)
@@ -47,7 +46,7 @@ void showcase_request_builders(http::client& client) {
     auto get_req = client.get("https://example.com")
                        .query("lang", "en")
                        .header("accept-language", "en-US")
-                       .cookie("session=manual; preview=true")
+                       .cookies("session=manual; preview=true")
                        .timeout(2s)
                        .build();
 
@@ -74,8 +73,7 @@ void showcase_request_builders(http::client& client) {
                          .body(R"({"enabled":true})")
                          .build();
 
-    auto delete_req =
-        client.del("https://api.example.com/items/42").no_proxy().no_cookies().build();
+    auto delete_req = client.del("https://api.example.com/items/42").no_proxy().build();
 
     auto head_req = client.head("https://example.com").build();
 }
@@ -85,15 +83,7 @@ task<> run_showcase(event_loop& loop) {
     showcase_request_builders(client);
     auto api = client.on(loop);
 
-    // Cookie store management goes straight to libcurl's cookie engine.
-    client.store_cookie("https://example.com",
-                        "Set-Cookie: stored_demo=1; Domain=example.com; Path=/; Secure");
-
-    auto cookies = client.cookie_list();
-    std::cout << "cookie store entries: " << cookies.size() << "\n";
-    for(const auto& line: cookies) {
-        std::cout << "  " << line << "\n";
-    }
+    client.record_cookie(true);
 
     auto home = co_await api.get("https://example.com")
                     .header("accept", "text/html")
@@ -126,9 +116,8 @@ task<> run_showcase(event_loop& loop) {
     }
 
     std::cout << "HEAD " << head->url << " -> " << head->status << "\n";
-
-    client.clear_cookies();
-    std::cout << "cookie store entries after clear: " << client.cookie_list().size() << "\n";
+    client.record_cookie(false);
+    std::cout << "automatic cookie recording disabled for subsequent requests\n";
 }
 
 }  // namespace

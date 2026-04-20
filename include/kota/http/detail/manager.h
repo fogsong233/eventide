@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <unordered_map>
 
-#include "kota/http/curl.h"
+#include "kota/http/detail/curl.h"
 #include "kota/async/io/loop.h"
 
 struct uv_handle_s;

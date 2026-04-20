@@ -4,6 +4,7 @@
 #include <print>
 #include <string>
 
+#include "kota/http/detail/manager.h"
 #include "kota/http/http.h"
 #include "kota/async/async.h"
 

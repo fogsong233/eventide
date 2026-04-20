@@ -4,7 +4,7 @@
 #include <string_view>
 #include <vector>
 
-#include "kota/http/common.h"
+#include "kota/http/detail/common.h"
 
 namespace kota::http::detail {
 

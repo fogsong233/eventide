@@ -261,6 +261,11 @@ if(KOTA_BUILD_ALL_TESTS)
         set(KOTA_ENABLE_ASYNC ON CACHE BOOL "Enable async kotatsu target and libuv dependency" FORCE)
     endif()
 
+    if(NOT KOTA_ENABLE_HTTP)
+        message(STATUS "KOTA_BUILD_ALL_TESTS=ON: enabling KOTA_ENABLE_HTTP")
+        set(KOTA_ENABLE_HTTP ON CACHE BOOL "Enable http target and libcurl dependency" FORCE)
+    endif()
+
     if(NOT KOTA_ENABLE_OPTION)
         message(STATUS "KOTA_BUILD_ALL_TESTS=ON: enabling KOTA_ENABLE_OPTION")
         set(KOTA_ENABLE_OPTION ON CACHE BOOL "Enable option parser target" FORCE)

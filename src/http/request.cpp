@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "kota/http/client.h"
+#include "kota/http/detail/client.h"
 #include "kota/http/detail/client_state.h"
 #include "kota/http/detail/runtime.h"
 #include "kota/http/detail/util.h"
@@ -17,18 +17,19 @@ namespace kota::http {
 
 namespace {
 
-request make_request(method verb, std::string url, const client_options& options) {
+request make_request(std::string method, std::string url, const client_options& options) {
     request req;
-    req.verb = verb;
+    req.method = std::move(method);
     req.url = std::move(url);
     req.headers = options.default_headers;
-    req.cookie = options.default_cookie;
+    req.cookie = options.default_cookies;
     req.user_agent = options.user_agent;
     req.proxy_config = options.proxy_config;
     req.redirect = options.redirect;
     req.tls = options.tls;
     req.timeout = options.timeout;
-    req.use_cookie_store = options.use_cookie_store;
+    req.curl_options = options.curl_options;
+    req.record_cookie = options.record_cookie;
     req.disable_proxy = options.disable_proxy;
     return req;
 }
@@ -37,25 +38,33 @@ task<response, error> make_failed_response(error err) {
     co_await fail(std::move(err));
 }
 
-template <typename Fn>
-auto with_cookie_easy(const client_state& state, Fn&& fn) {
-    curl::easy_handle easy = curl::easy_handle::create();
-    using result_t = decltype(fn(easy.get()));
-    if(!easy || !state.bind_easy(easy.get(), true)) {
-        if constexpr(std::is_void_v<result_t>) {
-            return;
-        } else {
-            return result_t{};
-        }
+request_builder make_request_builder(const std::shared_ptr<client_state>& state,
+                                     event_loop* dispatch_loop,
+                                     std::string method,
+                                     std::string url) {
+    return request_builder(state,
+                           dispatch_loop,
+                           make_request(std::move(method), std::move(url), state->options()));
+}
+
+template <typename Options>
+std::expected<client, error> build_client(event_loop* bound_loop, Options&& options) {
+    if(auto code = detail::ensure_curl_runtime(); !curl::ok(code)) {
+        return std::unexpected(error::from_curl(code));
     }
 
-    return fn(easy.get());
+    client out(std::forward<Options>(options));
+    if(bound_loop) {
+        out.bind(*bound_loop);
+    }
+    return out;
 }
 
 void require_share_setopt(CURLSH* share,
                           CURLSHoption option,
                           auto value,
                           const char* message) noexcept {
+    (void)message;
     [[maybe_unused]] auto err = curl::share_setopt(share, option, value);
     assert(curl::ok(err) && message);
 }
@@ -118,7 +127,11 @@ const client_options& client_state::options() const noexcept {
     return defaults;
 }
 
-bool client_state::bind_easy(CURL* easy, bool enable_cookie_store) const noexcept {
+void client_state::record_cookie(bool enabled) noexcept {
+    defaults.record_cookie = enabled;
+}
+
+bool client_state::bind_easy(CURL* easy, bool enable_record_cookie) const noexcept {
     if(!easy || !share) {
         return false;
     }
@@ -127,7 +140,7 @@ bool client_state::bind_easy(CURL* easy, bool enable_cookie_store) const noexcep
         return false;
     }
 
-    if(enable_cookie_store) {
+    if(enable_record_cookie) {
         if(auto err = curl::setopt(easy, CURLOPT_COOKIEFILE, ""); !curl::ok(err)) {
             return false;
         }
@@ -135,47 +148,6 @@ bool client_state::bind_easy(CURL* easy, bool enable_cookie_store) const noexcep
 
     return true;
 }
-
-void client_state::clear_cookies() {
-    with_cookie_easy(*this, [](CURL* easy) {
-        [[maybe_unused]] auto err = curl::setopt(easy, CURLOPT_COOKIELIST, "ALL");
-    });
-}
-
-void client_state::store_cookie(std::string_view url, std::string_view value) {
-    if(value.empty()) {
-        return;
-    }
-
-    with_cookie_easy(*this, [&](CURL* easy) {
-        std::string url_text(url);
-        std::string value_text(value);
-        if(!url.empty()) {
-            [[maybe_unused]] auto url_err = curl::setopt(easy, CURLOPT_URL, url_text.c_str());
-        }
-        [[maybe_unused]] auto err = curl::setopt(easy, CURLOPT_COOKIELIST, value_text.c_str());
-    });
-}
-
-std::vector<std::string> client_state::cookie_list() const {
-    return with_cookie_easy(*this, [&](CURL* easy) {
-        curl_slist* raw = nullptr;
-        if(auto err = curl::getinfo(easy, CURLINFO_COOKIELIST, &raw); !curl::ok(err) || !raw) {
-            return std::vector<std::string>{};
-        }
-
-        curl::slist owned(raw);
-        std::vector<std::string> out;
-        for(auto* it = raw; it != nullptr; it = it->next) {
-            if(!it->data) {
-                continue;
-            }
-            out.emplace_back(it->data);
-        }
-        return out;
-    });
-}
-
 void client_state::on_share_lock(CURL*,
                                  curl_lock_data data,
                                  curl_lock_access,
@@ -207,7 +179,7 @@ std::mutex& client_state::mutex_for(curl_lock_data data) noexcept {
 request_builder::request_builder(std::shared_ptr<client_state> owner,
                                  event_loop* dispatch_loop,
                                  request req) noexcept :
-    owner(owner), dispatch_loop(dispatch_loop), spec(std::move(req)) {}
+    owner(std::move(owner)), dispatch_loop(dispatch_loop), spec(std::move(req)) {}
 
 request_builder& request_builder::header(std::string name, std::string value) {
     detail::upsert_header(spec.headers, std::move(name), std::move(value));
@@ -219,8 +191,13 @@ request_builder& request_builder::query(std::string name, std::string value) {
     return *this;
 }
 
-request_builder& request_builder::cookie(std::string value) {
+request_builder& request_builder::cookies(std::string value) {
     spec.cookie = std::move(value);
+    return *this;
+}
+
+request_builder& request_builder::method(std::string value) {
+    spec.method = std::move(value);
     return *this;
 }
 
@@ -258,11 +235,6 @@ request_builder& request_builder::timeout(std::chrono::milliseconds value) {
     return *this;
 }
 
-request_builder& request_builder::no_cookies() {
-    spec.use_cookie_store = false;
-    return *this;
-}
-
 request_builder& request_builder::json_text(std::string body) {
     spec.body = std::move(body);
     detail::upsert_header(spec.headers, "content-type", "application/json");
@@ -282,6 +254,12 @@ request_builder& request_builder::body(std::string body) {
 
 task<response, error> request_builder::failed(error err) {
     return make_failed_response(std::move(err));
+}
+
+void request_builder::remember_error(error err) noexcept {
+    if(!staged_error) {
+        staged_error = std::move(err);
+    }
 }
 
 std::optional<std::reference_wrapper<event_loop>>
@@ -310,11 +288,6 @@ client_builder& client_builder::default_header(std::string name, std::string val
     return *this;
 }
 
-client_builder& client_builder::default_cookie(std::string value) {
-    options.default_cookie = std::move(value);
-    return *this;
-}
-
 client_builder& client_builder::user_agent(std::string value) {
     options.user_agent = std::move(value);
     return *this;
@@ -338,11 +311,6 @@ client_builder& client_builder::no_proxy() {
 
 client_builder& client_builder::timeout(std::chrono::milliseconds value) {
     options.timeout = value;
-    return *this;
-}
-
-client_builder& client_builder::cookie_store(bool enabled) {
-    options.use_cookie_store = enabled;
     return *this;
 }
 
@@ -392,27 +360,11 @@ client_builder& client_builder::ca_path(std::string path) {
 }
 
 std::expected<client, error> client_builder::build() const& {
-    if(auto code = detail::ensure_curl_runtime(); !curl::ok(code)) {
-        return std::unexpected(error::from_curl(code));
-    }
-
-    client out(options);
-    if(bound_loop) {
-        out.bind(*bound_loop);
-    }
-    return out;
+    return build_client(bound_loop, options);
 }
 
 std::expected<client, error> client_builder::build() && {
-    if(auto code = detail::ensure_curl_runtime(); !curl::ok(code)) {
-        return std::unexpected(error::from_curl(code));
-    }
-
-    client out(std::move(options));
-    if(bound_loop) {
-        out.bind(*bound_loop);
-    }
-    return out;
+    return build_client(bound_loop, std::move(options));
 }
 
 client::client(client_options options) :
@@ -449,34 +401,32 @@ bound_client client::on(event_loop& loop) & noexcept {
     return bound_client(state, loop);
 }
 
-request_builder client::request(method verb, std::string url) const& {
-    return request_builder(state,
-                           nullptr,
-                           make_request(verb, std::move(url), state->options()));
+request_builder client::request(std::string method, std::string url) const& {
+    return make_request_builder(state, nullptr, std::move(method), std::move(url));
 }
 
 request_builder client::get(std::string url) const& {
-    return request(method::get, std::move(url));
+    return request(std::string(http::method::get), std::move(url));
 }
 
 request_builder client::post(std::string url) const& {
-    return request(method::post, std::move(url));
+    return request(std::string(http::method::post), std::move(url));
 }
 
 request_builder client::put(std::string url) const& {
-    return request(method::put, std::move(url));
+    return request(std::string(http::method::put), std::move(url));
 }
 
 request_builder client::patch(std::string url) const& {
-    return request(method::patch, std::move(url));
+    return request(std::string(http::method::patch), std::move(url));
 }
 
 request_builder client::del(std::string url) const& {
-    return request(method::del, std::move(url));
+    return request(std::string(http::method::del), std::move(url));
 }
 
 request_builder client::head(std::string url) const& {
-    return request(method::head, std::move(url));
+    return request(std::string(http::method::head), std::move(url));
 }
 
 task<response, error> client::execute(http::request req) const& {
@@ -488,17 +438,9 @@ task<response, error> client::execute(http::request req) const& {
     return detail::execute_with_state(std::move(req), bound->get(), state);
 }
 
-client& client::store_cookie(std::string url, std::string value) {
-    state->store_cookie(url, std::move(value));
+client& client::record_cookie(bool enabled) noexcept {
+    state->record_cookie(enabled);
     return *this;
-}
-
-std::vector<std::string> client::cookie_list() const {
-    return state->cookie_list();
-}
-
-void client::clear_cookies() {
-    state->clear_cookies();
 }
 
 std::optional<std::reference_wrapper<event_loop>> client::loop() const noexcept {
@@ -509,34 +451,32 @@ const client_options& client::options() const noexcept {
     return state->options();
 }
 
-request_builder bound_client::request(method verb, std::string url) const noexcept {
-    return request_builder(state,
-                           dispatch_loop,
-                           make_request(verb, std::move(url), state->options()));
+request_builder bound_client::request(std::string method, std::string url) const noexcept {
+    return make_request_builder(state, dispatch_loop, std::move(method), std::move(url));
 }
 
 request_builder bound_client::get(std::string url) const noexcept {
-    return request(method::get, std::move(url));
+    return request(std::string(http::method::get), std::move(url));
 }
 
 request_builder bound_client::post(std::string url) const noexcept {
-    return request(method::post, std::move(url));
+    return request(std::string(http::method::post), std::move(url));
 }
 
 request_builder bound_client::put(std::string url) const noexcept {
-    return request(method::put, std::move(url));
+    return request(std::string(http::method::put), std::move(url));
 }
 
 request_builder bound_client::patch(std::string url) const noexcept {
-    return request(method::patch, std::move(url));
+    return request(std::string(http::method::patch), std::move(url));
 }
 
 request_builder bound_client::del(std::string url) const noexcept {
-    return request(method::del, std::move(url));
+    return request(std::string(http::method::del), std::move(url));
 }
 
 request_builder bound_client::head(std::string url) const noexcept {
-    return request(method::head, std::move(url));
+    return request(std::string(http::method::head), std::move(url));
 }
 
 task<response, error> bound_client::execute(http::request req) const {

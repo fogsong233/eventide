@@ -5,12 +5,12 @@
 #include <string>
 #include <vector>
 
-#include "kota/http/common.h"
+#include "kota/http/detail/common.h"
 
 namespace kota::http {
 
 struct request {
-    method verb = method::get;
+    std::string method = std::string(http::method::get);
     std::string url;
     std::vector<header> headers;
     std::string cookie;
@@ -21,7 +21,8 @@ struct request {
     redirect_policy redirect = redirect_policy::limited();
     tls_options tls{};
     std::optional<std::chrono::milliseconds> timeout;
-    bool use_cookie_store = true;
+    std::vector<curl_option_hook> curl_options;
+    bool record_cookie = true;
     bool disable_proxy = false;
 };
 

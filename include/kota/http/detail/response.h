@@ -7,12 +7,12 @@
 #include <string_view>
 #include <vector>
 
-#include "kota/http/common.h"
+#include "kota/http/detail/common.h"
 
 namespace kota::http {
 
 struct response {
-    long status = 0;
+    int status = 0;
     std::string url;
     std::vector<header> headers;
     std::vector<std::byte> body;
