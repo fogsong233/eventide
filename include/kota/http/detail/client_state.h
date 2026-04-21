@@ -3,6 +3,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+
 #include "kota/http/detail/curl.h"
 #include "kota/http/detail/options.h"
 #include "kota/async/io/loop.h"

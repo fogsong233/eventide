@@ -1,10 +1,11 @@
+#include "kota/http/detail/prepared_request.h"
+
 #include <cassert>
 #include <cstddef>
 #include <limits>
 #include <memory>
 #include <string_view>
 
-#include "kota/http/detail/prepared_request.h"
 #include "kota/http/detail/util.h"
 
 namespace kota::http {
@@ -160,6 +161,11 @@ bool prepared_request::apply_body() noexcept {
         return true;
     }
 
+    if(detail::iequals(spec.method, http::method::get) ||
+       detail::iequals(spec.method, http::method::head)) {
+        return fail(error::invalid_request("request body is not supported for GET or HEAD"));
+    }
+
     return easy_setopt(*this,
                        CURLOPT_POSTFIELDSIZE_LARGE,
                        static_cast<curl_off_t>(spec.body.size())) &&
@@ -221,8 +227,8 @@ bool prepared_request::apply_tls() noexcept {
         return false;
     }
 #else
-    long protocols = spec.tls.https_only ? CURLPROTO_HTTPS
-                                         : static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    long protocols =
+        spec.tls.https_only ? CURLPROTO_HTTPS : static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS);
     if(!easy_setopt(*this, CURLOPT_PROTOCOLS, protocols) ||
        !easy_setopt(*this, CURLOPT_REDIR_PROTOCOLS, protocols)) {
         return false;

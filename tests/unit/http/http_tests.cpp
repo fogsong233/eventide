@@ -323,20 +323,35 @@ task<std::string, http::error> interleaved_fetch(http::bound_client api,
     co_return first.text_copy() + "|" + second.text_copy();
 }
 
+task<void, http::error> destroy_sibling_after_first(http::bound_client api,
+                                                    std::string first_url,
+                                                    std::optional<task<http::response, http::error>>& sibling) {
+    auto first = co_await api.get(std::move(first_url)).send().or_fail();
+    EXPECT_EQ(first.text(), "/first");
+    sibling.reset();
+}
+
+task<std::string, http::error> recreate_manager_between_requests(http::client& client,
+                                                                 event_loop& loop,
+                                                                 std::string first_url,
+                                                                 std::string second_url) {
+    auto first = co_await client.get(std::move(first_url)).send().or_fail();
+    http::manager::unregister_loop(loop);
+    auto second = co_await client.get(std::move(second_url)).send().or_fail();
+    co_return first.text_copy() + "|" + second.text_copy();
+}
+
 }  // namespace
 
 TEST_SUITE(http_client, http_loop_fixture) {
 
 TEST_CASE(builder_overrides_preserve_manual_cookie) {
-    http::client client(loop,
-                        {.proxy_config = http::proxy{.url = "http://proxy.internal:9000"},
-                         .record_cookie = true});
+    http::client client(
+        loop,
+        {.proxy_config = http::proxy{.url = "http://proxy.internal:9000"}, .record_cookie = true});
 
-    auto built = client.get("http://example.test")
-                     .cookies("manual=1")
-                     .no_proxy()
-                     .timeout(25ms)
-                     .build();
+    auto built =
+        client.get("http://example.test").cookies("manual=1").no_proxy().timeout(25ms).build();
 
     EXPECT_TRUE(built.record_cookie);
     EXPECT_TRUE(built.disable_proxy);
@@ -676,6 +691,26 @@ TEST_CASE(form_request_sets_content_type_and_encodes_body) {
     EXPECT_EQ(result->text(), "application/x-www-form-urlencoded|name=alice&note=a%20b%2Bc");
 }
 
+TEST_CASE(get_request_with_body_is_rejected) {
+    http::client client(loop);
+
+    auto req = client.get("https://example.com").body("unexpected").send();
+    auto result = run_task(*this, req);
+    EXPECT_TRUE(result.has_error());
+    EXPECT_EQ(result.error().kind, http::error_kind::invalid_request);
+    EXPECT_EQ(result.error().message(), "request body is not supported for GET or HEAD");
+}
+
+TEST_CASE(head_request_with_body_is_rejected) {
+    http::client client(loop);
+
+    auto req = client.head("https://example.com").body("unexpected").send();
+    auto result = run_task(*this, req);
+    EXPECT_TRUE(result.has_error());
+    EXPECT_EQ(result.error().kind, http::error_kind::invalid_request);
+    EXPECT_EQ(result.error().message(), "request body is not supported for GET or HEAD");
+}
+
 TEST_CASE(head_request_captures_headers_and_skips_body) {
     test_http_server server(loop, [](const server_request& request) -> server_response {
         EXPECT_EQ(request.method, "HEAD");
@@ -935,6 +970,53 @@ TEST_CASE(cancelled_request_does_not_break_following_requests) {
     auto next_result = run_task(*this, next);
     ASSERT_TRUE(next_result.has_value());
     EXPECT_EQ(next_result->text(), "ok");
+    EXPECT_EQ(http::manager::for_loop(loop).pending_requests(), std::size_t(0));
+}
+
+TEST_CASE(destroying_a_sibling_task_after_http_completion_keeps_manager_healthy) {
+    test_http_server server(loop, [](const server_request& request) -> server_response {
+        server_response response;
+        response.body = request.target;
+        response.delay = 25ms;
+        return response;
+    });
+    ASSERT_TRUE(server.valid());
+
+    http::client client(loop);
+    std::optional<task<http::response, http::error>> sibling(
+        std::in_place,
+        client.get(server.url("/second")).send());
+    auto flow = destroy_sibling_after_first(client.on(loop), server.url("/first"), sibling);
+
+    loop.schedule(flow);
+    loop.schedule(*sibling);
+    loop.run();
+
+    auto flow_result = flow.result();
+    ASSERT_TRUE(flow_result.has_value());
+    EXPECT_FALSE(sibling.has_value());
+    EXPECT_EQ(http::manager::for_loop(loop).pending_requests(), std::size_t(0));
+
+    auto next = client.get(server.url("/after")).send();
+    auto next_result = run_task(*this, next);
+    ASSERT_TRUE(next_result.has_value());
+    EXPECT_EQ(next_result->text(), "/after");
+}
+
+TEST_CASE(http_completion_can_recreate_manager_inline) {
+    test_http_server server(loop, [](const server_request& request) -> server_response {
+        server_response response;
+        response.body = request.target;
+        return response;
+    });
+    ASSERT_TRUE(server.valid());
+
+    http::client client(loop);
+    auto flow =
+        recreate_manager_between_requests(client, loop, server.url("/first"), server.url("/second"));
+    auto result = run_task(*this, flow);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "/first|/second");
     EXPECT_EQ(http::manager::for_loop(loop).pending_requests(), std::size_t(0));
 }
 

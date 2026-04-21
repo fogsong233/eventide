@@ -12,15 +12,15 @@ namespace kota::http {
 
 namespace method {
 
-inline constexpr std::string_view get = "GET";
-inline constexpr std::string_view post = "POST";
-inline constexpr std::string_view put = "PUT";
-inline constexpr std::string_view patch = "PATCH";
-inline constexpr std::string_view del = "DELETE";
-inline constexpr std::string_view head = "HEAD";
-inline constexpr std::string_view options = "OPTIONS";
-inline constexpr std::string_view trace = "TRACE";
-inline constexpr std::string_view connect = "CONNECT";
+constexpr inline std::string_view get = "GET";
+constexpr inline std::string_view post = "POST";
+constexpr inline std::string_view put = "PUT";
+constexpr inline std::string_view patch = "PATCH";
+constexpr inline std::string_view del = "DELETE";
+constexpr inline std::string_view head = "HEAD";
+constexpr inline std::string_view options = "OPTIONS";
+constexpr inline std::string_view trace = "TRACE";
+constexpr inline std::string_view connect = "CONNECT";
 
 }  // namespace method
 

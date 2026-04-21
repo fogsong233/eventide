@@ -4,6 +4,7 @@
 #include <string>
 
 #include "kota/http/detail/client_state.h"
+#include "kota/http/detail/curl.h"
 #include "kota/http/detail/request.h"
 #include "kota/http/detail/response.h"
 #include "kota/async/runtime/task.h"

@@ -1,3 +1,5 @@
+#include "kota/http/detail/manager.h"
+
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
@@ -8,7 +10,6 @@
 #include <vector>
 
 #include "../async/libuv.h"
-#include "kota/http/detail/manager.h"
 #include "kota/http/detail/runtime.h"
 
 namespace kota::http {
@@ -160,7 +161,7 @@ void manager::drain_completed_arming(void* arming_request) noexcept {
 }
 
 void manager::drain_completed_impl(void* arming_request) noexcept {
-    std::vector<std::pair<void*, curl::easy_error>> deferred;
+    std::vector<std::pair<detail::request_runtime_ref, curl::easy_error>> deferred;
     int pending = 0;
     while(auto* msg = curl::multi_info_read(multi.get(), &pending)) {
         if(msg->msg != CURLMSG_DONE) {
@@ -173,19 +174,28 @@ void manager::drain_completed_impl(void* arming_request) noexcept {
             continue;
         }
 
-        remove_request(easy);
-        if(arming_request != nullptr && opaque == arming_request) {
-            detail::mark_request_operation_removed(opaque);
-            detail::complete_request_operation(opaque, msg->data.result, true);
+        auto runtime = detail::retain_request_operation(opaque);
+        if(!runtime) {
             continue;
         }
 
-        detail::mark_request_operation_removed(opaque);
-        deferred.emplace_back(opaque, msg->data.result);
+        remove_request(easy);
+        if(arming_request != nullptr && opaque == arming_request) {
+            detail::mark_request_operation_removed(runtime);
+            detail::complete_request_operation(runtime, msg->data.result, true);
+            continue;
+        }
+
+        detail::mark_request_operation_removed(runtime);
+        deferred.emplace_back(std::move(runtime), msg->data.result);
     }
 
-    for(auto& [opaque, result]: deferred) {
-        detail::complete_request_operation(opaque, result, false);
+    if(deferred.empty()) {
+        return;
+    }
+
+    for(auto& [runtime, result]: deferred) {
+        detail::complete_request_operation(runtime, result, false);
     }
 }
 

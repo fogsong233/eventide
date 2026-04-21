@@ -148,6 +148,7 @@ bool client_state::bind_easy(CURL* easy, bool enable_record_cookie) const noexce
 
     return true;
 }
+
 void client_state::on_share_lock(CURL*,
                                  curl_lock_data data,
                                  curl_lock_access,
