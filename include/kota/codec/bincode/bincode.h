@@ -3,11 +3,9 @@
 #include "kota/codec/bincode/deserializer.h"
 #include "kota/codec/bincode/error.h"
 #include "kota/codec/bincode/serializer.h"
-#include "kota/codec/raw_value.h"
+#include "kota/codec/detail/raw_value.h"
 
 namespace kota::codec {
-
-// --- Bincode serialization: length-prefixed bytes ---
 
 template <typename Config>
 struct serialize_traits<bincode::Serializer<Config>, RawValue> {
@@ -22,8 +20,6 @@ struct serialize_traits<bincode::Serializer<Config>, RawValue> {
         return serializer.serialize_bytes(bytes);
     }
 };
-
-// --- Bincode deserialization: length-prefixed bytes ---
 
 template <typename Config>
 struct deserialize_traits<bincode::Deserializer<Config>, RawValue> {

@@ -11,9 +11,9 @@
 #include <vector>
 
 #include "kota/support/expected_try.h"
-#include "kota/codec/codec.h"
-#include "kota/codec/config.h"
-#include "kota/codec/detail/backend_helpers.h"
+#include "kota/codec/detail/backend.h"
+#include "kota/codec/detail/codec.h"
+#include "kota/codec/detail/config.h"
 #include "kota/codec/json/error.h"
 
 namespace kota::codec::json {
@@ -25,18 +25,13 @@ public:
     using value_type = void;
     using error_type = json::error_kind;
 
+    constexpr static auto backend_kind_v = backend_kind::streaming;
+    constexpr static auto field_mode_v = field_mode::by_name;
+
     template <typename T>
     using result_t = std::expected<T, error_type>;
 
     using status_t = result_t<void>;
-
-    using SerializeArray = codec::detail::SerializeArray<Serializer<Config>>;
-    using SerializeObject = codec::detail::SerializeObject<Serializer<Config>>;
-
-    using SerializeSeq = SerializeArray;
-    using SerializeTuple = SerializeArray;
-    using SerializeMap = SerializeObject;
-    using SerializeStruct = SerializeObject;
 
     Serializer() = default;
 
@@ -80,7 +75,11 @@ public:
     }
 
     result_t<value_type> serialize_null() {
-        return null();
+        if(!before_value()) {
+            return status();
+        }
+        builder.append_null();
+        return status();
     }
 
     template <typename T>
@@ -164,63 +163,26 @@ public:
     }
 
     result_t<value_type> serialize_bytes(std::string_view value) {
-        KOTA_EXPECTED_TRY_V(auto seq, serialize_seq(value.size()));
-
+        KOTA_EXPECTED_TRY(begin_array(value.size()));
         for(unsigned char byte: value) {
-            KOTA_EXPECTED_TRY(seq.serialize_element(static_cast<std::uint64_t>(byte)));
+            KOTA_EXPECTED_TRY(serialize_uint(static_cast<std::uint64_t>(byte)));
         }
-
-        return seq.end();
+        return end_array();
     }
 
     result_t<value_type> serialize_bytes(std::span<const std::byte> value) {
-        KOTA_EXPECTED_TRY_V(auto seq, serialize_seq(value.size()));
-
+        KOTA_EXPECTED_TRY(begin_array(value.size()));
         for(std::byte byte: value) {
-            KOTA_EXPECTED_TRY(seq.serialize_element(
-                static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(byte))));
+            KOTA_EXPECTED_TRY(
+                serialize_uint(static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(byte))));
         }
-
-        return seq.end();
+        return end_array();
     }
 
-    result_t<SerializeSeq> serialize_seq(std::optional<std::size_t> /*len*/) {
-        KOTA_EXPECTED_TRY(begin_array());
-        return SerializeSeq(*this);
-    }
-
-    result_t<SerializeTuple> serialize_tuple(std::size_t /*len*/) {
-        KOTA_EXPECTED_TRY(begin_array());
-        return SerializeTuple(*this);
-    }
-
-    result_t<SerializeMap> serialize_map(std::optional<std::size_t> /*len*/) {
-        KOTA_EXPECTED_TRY(begin_object());
-        return SerializeMap(*this);
-    }
-
-    result_t<SerializeStruct> serialize_struct(std::string_view /*name*/, std::size_t /*len*/) {
-        KOTA_EXPECTED_TRY(begin_object());
-        return SerializeStruct(*this);
-    }
-
-private:
-    friend class codec::detail::SerializeArray<Serializer<Config>>;
-    friend class codec::detail::SerializeObject<Serializer<Config>>;
-
-    enum class container_kind : std::uint8_t { array, object };
-
-    struct container_frame {
-        container_kind kind;
-        bool first = true;
-        bool expect_key = true;
-    };
-
-    status_t begin_object() {
+    status_t begin_object(std::size_t /*count*/) {
         if(!before_value()) {
             return status();
         }
-
         builder.start_object();
         stack.push_back(container_frame{container_kind::object, true, true});
         return {};
@@ -243,14 +205,47 @@ private:
         return status();
     }
 
-    status_t begin_array() {
+    status_t field(std::string_view name) {
+        if(!is_valid || stack.empty()) {
+            mark_invalid();
+            return std::unexpected(last_error);
+        }
+
+        auto& frame = stack.back();
+        if(frame.kind != container_kind::object || !frame.expect_key) {
+            mark_invalid();
+            return std::unexpected(last_error);
+        }
+
+        if(!frame.first) {
+            builder.append_comma();
+        }
+        frame.first = false;
+
+        builder.escape_and_append_with_quotes(name);
+        builder.append_colon();
+        frame.expect_key = false;
+        return status();
+    }
+
+    status_t begin_array(std::optional<std::size_t> /*count*/) {
         if(!before_value()) {
             return status();
         }
-
         builder.start_array();
         stack.push_back(container_frame{container_kind::array, true, false});
         return {};
+    }
+
+    template <typename F>
+    status_t serialize_field(std::string_view name, F&& writer) {
+        KOTA_EXPECTED_TRY(field(name));
+        return std::forward<F>(writer)();
+    }
+
+    template <typename F>
+    status_t serialize_element(F&& writer) {
+        return std::forward<F>(writer)();
     }
 
     result_t<value_type> end_array() {
@@ -269,37 +264,14 @@ private:
         return status();
     }
 
-    status_t key(std::string_view key_name) {
-        if(!is_valid || stack.empty()) {
-            mark_invalid();
-            return std::unexpected(last_error);
-        }
+private:
+    enum class container_kind : std::uint8_t { array, object };
 
-        auto& frame = stack.back();
-        if(frame.kind != container_kind::object || !frame.expect_key) {
-            mark_invalid();
-            return std::unexpected(last_error);
-        }
-
-        if(!frame.first) {
-            builder.append_comma();
-        }
-        frame.first = false;
-
-        builder.escape_and_append_with_quotes(key_name);
-        builder.append_colon();
-        frame.expect_key = false;
-        return status();
-    }
-
-    status_t null() {
-        if(!before_value()) {
-            return status();
-        }
-
-        builder.append_null();
-        return status();
-    }
+    struct container_frame {
+        container_kind kind;
+        bool first = true;
+        bool expect_key = true;
+    };
 
     bool before_value() {
         if(!is_valid) {

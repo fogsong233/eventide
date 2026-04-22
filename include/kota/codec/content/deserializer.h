@@ -13,11 +13,11 @@
 #include <vector>
 
 #include "kota/support/expected_try.h"
-#include "kota/codec/codec.h"
-#include "kota/codec/config.h"
 #include "kota/codec/content/document.h"
 #include "kota/codec/content/error.h"
-#include "kota/codec/detail/backend_helpers.h"
+#include "kota/codec/detail/backend.h"
+#include "kota/codec/detail/codec.h"
+#include "kota/codec/detail/config.h"
 #include "kota/codec/detail/narrow.h"
 
 namespace kota::codec::content {
@@ -28,43 +28,13 @@ public:
     using config_type = Config;
     using error_type = content::error;
 
+    constexpr static auto backend_kind_v = backend_kind::streaming;
+    constexpr static auto field_mode_v = field_mode::by_name;
+
     template <typename T>
     using result_t = std::expected<T, error_type>;
 
     using status_t = result_t<void>;
-
-    class DeserializeArray :
-        public codec::detail::IndexedArrayDeserializer<Deserializer, const content::Array*> {
-        using Base = codec::detail::IndexedArrayDeserializer<Deserializer, const content::Array*>;
-        friend class Deserializer;
-
-        DeserializeArray(Deserializer& deserializer,
-                         const content::Array* array,
-                         std::size_t expectedLength,
-                         bool isStrictLength) :
-            Base(deserializer, array, array->size(), expectedLength, isStrictLength) {}
-    };
-
-    class DeserializeObject :
-        public codec::detail::IndexedObjectDeserializer<Deserializer, content::Cursor> {
-        using Base = codec::detail::IndexedObjectDeserializer<Deserializer, content::Cursor>;
-        friend class Deserializer;
-
-        DeserializeObject(Deserializer& deserializer, const content::Object* object) :
-            Base(deserializer) {
-            auto collected = deserializer.collect_object_entries(*object);
-            if(!collected) {
-                (void)deserializer.mark_invalid(collected.error());
-                return;
-            }
-            this->entries = std::move(*collected);
-        }
-    };
-
-    using DeserializeSeq = DeserializeArray;
-    using DeserializeTuple = DeserializeArray;
-    using DeserializeMap = DeserializeObject;
-    using DeserializeStruct = DeserializeObject;
 
     explicit Deserializer(const content::Value& value) :
         owned_root_value(value), root_value(owned_root_value->cursor()) {
@@ -267,37 +237,21 @@ public:
     }
 
     status_t deserialize_bytes(std::vector<std::byte>& value) {
-        return codec::detail::deserialize_bytes_from_seq(*this, value);
-    }
-
-    result_t<DeserializeSeq> deserialize_seq(std::optional<std::size_t> len) {
-        KOTA_EXPECTED_TRY_V(auto array, open_array());
-        return DeserializeSeq(*this, array, len.value_or(0), false);
-    }
-
-    result_t<DeserializeTuple> deserialize_tuple(std::size_t len) {
-        KOTA_EXPECTED_TRY_V(auto array, open_array());
-        return DeserializeTuple(*this, array, len, true);
-    }
-
-    result_t<DeserializeMap> deserialize_map(std::optional<std::size_t> /*len*/) {
-        KOTA_EXPECTED_TRY_V(auto object, open_object());
-
-        DeserializeMap map(*this, object);
-        if(!is_valid) {
-            return std::unexpected(last_error);
+        KOTA_EXPECTED_TRY(begin_array());
+        value.clear();
+        while(true) {
+            KOTA_EXPECTED_TRY_V(auto has_next, next_element());
+            if(!has_next) {
+                break;
+            }
+            std::uint64_t byte_val = 0;
+            KOTA_EXPECTED_TRY(deserialize_uint(byte_val));
+            if(byte_val > 255U) {
+                return mark_invalid(error_type::number_out_of_range);
+            }
+            value.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(byte_val)));
         }
-        return map;
-    }
-
-    result_t<DeserializeStruct> deserialize_struct(std::string_view /*name*/, std::size_t /*len*/) {
-        KOTA_EXPECTED_TRY_V(auto object, open_object());
-
-        DeserializeStruct structure(*this, object);
-        if(!is_valid) {
-            return std::unexpected(last_error);
-        }
-        return structure;
+        return end_array();
     }
 
     result_t<content::Value> capture_dom_value() {
@@ -309,10 +263,84 @@ public:
         return *ptr;
     }
 
-private:
-    friend class codec::detail::IndexedArrayDeserializer<Deserializer, const content::Array*>;
-    friend class codec::detail::IndexedObjectDeserializer<Deserializer, content::Cursor>;
+    status_t begin_object() {
+        KOTA_EXPECTED_TRY_V(auto ref, consume_value_ref());
+        const content::Object* obj = ref.get_object();
+        if(obj == nullptr) {
+            return mark_invalid(error_type::type_mismatch);
+        }
+        deser_stack.push_back(deser_frame{.object = obj, .it = obj->begin()});
+        return {};
+    }
 
+    result_t<std::optional<std::string_view>> next_field() {
+        if(!is_valid || deser_stack.empty()) {
+            return mark_invalid();
+        }
+        auto& frame = deser_stack.back();
+        if(frame.it == frame.object->end()) {
+            return std::optional<std::string_view>(std::nullopt);
+        }
+        const auto& entry = *frame.it;
+        ++frame.it;
+        current_value = content::Cursor(entry.value);
+        has_current_value = true;
+        return std::optional<std::string_view>(std::string_view(entry.key));
+    }
+
+    status_t skip_field_value() {
+        if(!is_valid) {
+            return std::unexpected(last_error);
+        }
+        // DOM-based: nothing to actually skip, just clear current value
+        has_current_value = false;
+        return {};
+    }
+
+    status_t end_object() {
+        if(!is_valid || deser_stack.empty()) {
+            return mark_invalid();
+        }
+        deser_stack.pop_back();
+        has_current_value = false;
+        return {};
+    }
+
+    status_t begin_array() {
+        KOTA_EXPECTED_TRY_V(auto ref, consume_value_ref());
+        const content::Array* arr = ref.get_array();
+        if(arr == nullptr) {
+            return mark_invalid(error_type::type_mismatch);
+        }
+        array_stack.push_back({arr, 0});
+        return {};
+    }
+
+    result_t<bool> next_element() {
+        if(!is_valid || array_stack.empty()) {
+            return mark_invalid();
+        }
+        auto& frame = array_stack.back();
+        if(frame.index >= frame.array->size()) {
+            has_current_value = false;
+            return false;
+        }
+        current_value = content::Cursor((*frame.array)[frame.index]);
+        has_current_value = true;
+        ++frame.index;
+        return true;
+    }
+
+    status_t end_array() {
+        if(!is_valid || array_stack.empty()) {
+            return mark_invalid();
+        }
+        array_stack.pop_back();
+        has_current_value = false;
+        return {};
+    }
+
+private:
     enum class value_kind : std::uint8_t {
         null,
         boolean,
@@ -370,16 +398,6 @@ private:
         return codec::deserialize(*this, out);
     }
 
-    template <typename T>
-    status_t deserialize_element_value(const content::Array* array, std::size_t index, T& out) {
-        return deserialize_from_value_ref(content::Cursor((*array)[index]), out);
-    }
-
-    template <typename T>
-    status_t deserialize_entry_value(content::Cursor value, T& out) {
-        return deserialize_from_value_ref(value, out);
-    }
-
     result_t<value_kind> peek_value_kind() {
         auto ref = peek_value_ref();
         if(!ref) {
@@ -420,21 +438,6 @@ private:
         }
     }
 
-    result_t<std::vector<typename DeserializeObject::entry>>
-        collect_object_entries(const content::Object& object) {
-        std::vector<typename DeserializeObject::entry> entries;
-        entries.reserve(object.size());
-
-        for(const auto& entry: object) {
-            entries.push_back(typename DeserializeObject::entry{
-                .key = std::string_view(entry.key),
-                .value = content::Cursor(entry.value),
-            });
-        }
-
-        return entries;
-    }
-
     result_t<content::Cursor> access_value_ref(bool consume) {
         if(!is_valid) {
             return std::unexpected(last_error);
@@ -459,32 +462,6 @@ private:
         return access_value_ref(true);
     }
 
-    result_t<const content::Array*> open_array() {
-        auto ref = consume_value_ref();
-        if(!ref) {
-            return std::unexpected(ref.error());
-        }
-
-        const content::Array* array = ref->get_array();
-        if(array == nullptr) {
-            return mark_invalid(error_type::type_mismatch);
-        }
-        return array;
-    }
-
-    result_t<const content::Object*> open_object() {
-        auto ref = consume_value_ref();
-        if(!ref) {
-            return std::unexpected(ref.error());
-        }
-
-        const content::Object* object = ref->get_object();
-        if(object == nullptr) {
-            return mark_invalid(error_type::type_mismatch);
-        }
-        return object;
-    }
-
     std::unexpected<error_type> mark_invalid(error_type error = error_type::invalid_state) {
         is_valid = false;
         if(last_error == error_type::invalid_state || error != error_type::invalid_state) {
@@ -494,6 +471,16 @@ private:
     }
 
 private:
+    struct deser_frame {
+        const content::Object* object = nullptr;
+        content::Object::const_iterator it{};
+    };
+
+    struct array_frame {
+        const content::Array* array = nullptr;
+        std::size_t index = 0;
+    };
+
     bool is_valid = true;
     bool root_consumed = false;
     error_type last_error = error_type::invalid_state;
@@ -501,6 +488,8 @@ private:
     content::Cursor root_value{};
     bool has_current_value = false;
     content::Cursor current_value{};
+    std::vector<deser_frame> deser_stack;
+    std::vector<array_frame> array_stack;
 };
 
 static_assert(codec::deserializer_like<Deserializer<>>);
