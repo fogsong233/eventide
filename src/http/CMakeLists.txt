@@ -1,8 +1,13 @@
-if(DEFINED ENV{CONDA_PREFIX} AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(OPENSSL_ROOT_DIR "$ENV{CONDA_PREFIX}" CACHE PATH "" FORCE)
-elseif(APPLE)
-    set(CURL_USE_OPENSSL OFF CACHE STRING "" FORCE)
-    set(CURL_USE_SECTRANSP ON CACHE STRING "" FORCE)
+if(DEFINED ENV{CONDA_PREFIX})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(OPENSSL_ROOT_DIR "$ENV{CONDA_PREFIX}" CACHE PATH "" FORCE)
+    elseif(APPLE)
+        execute_process(COMMAND brew --prefix openssl@3
+                        OUTPUT_VARIABLE _brew_openssl OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(_brew_openssl AND EXISTS "${_brew_openssl}")
+            set(OPENSSL_ROOT_DIR "${_brew_openssl}" CACHE PATH "" FORCE)
+        endif()
+    endif()
 endif()
 
 kota_add_git_dependency(
